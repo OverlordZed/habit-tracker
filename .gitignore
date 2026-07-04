@@ -1,0 +1,5 @@
+*.deb
+habit-tracker/.venv/
+habit-tracker/__pycache__/
+**/__pycache__/
+*.pyc
