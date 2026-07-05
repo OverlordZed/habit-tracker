@@ -3,6 +3,8 @@ from pathlib import Path
 
 DEFAULT_WEEKLY_TARGET = 40
 DEFAULT_MD_FILENAME = "Habit Tracker.md"
+TIME_FORMAT_MINUTES = "minutes"
+TIME_FORMAT_CENTI_HOURS = "centi_hours"
 
 
 def hours_to_minutes(hours):
@@ -23,17 +25,15 @@ def entries_equal(left, right):
 
 
 def merge_entries(local, remote):
-    merged = {}
-    all_dates = set(local) | set(remote)
-    for key in all_dates:
-        total_minutes = 0
-        if key in local:
-            total_minutes += hours_to_minutes(local[key])
-        if key in remote:
-            total_minutes += hours_to_minutes(remote[key])
-        if total_minutes > 0:
-            merged[key] = minutes_to_hours(total_minutes)
+    merged = dict(local)
+    merged.update(remote)
     return merged
+
+
+def raw_value_to_hours(raw, time_format):
+    if time_format == TIME_FORMAT_MINUTES:
+        return minutes_to_hours(raw)
+    return raw / 100
 
 
 def _parse_frontmatter(lines):
@@ -55,6 +55,8 @@ def _parse_frontmatter(lines):
         value = value.strip()
         if key == "weekly_target_hours":
             settings[key] = int(float(value))
+        elif key == "time_format":
+            settings[key] = value
         elif key == "last_updated":
             settings[key] = value
     return settings, lines[end + 1 :]
@@ -71,10 +73,19 @@ def _parse_table_row(line):
         return None
     try:
         date.fromisoformat(parts[0])
-        minutes = int(parts[1])
+        raw_value = int(parts[1])
     except ValueError:
         return None
-    return parts[0], minutes
+    return parts[0], raw_value
+
+
+def _resolve_time_format(settings, raw_values):
+    time_format = settings.get("time_format")
+    if time_format in (TIME_FORMAT_MINUTES, TIME_FORMAT_CENTI_HOURS):
+        return time_format
+    if raw_values and max(raw_values) >= 1000:
+        return TIME_FORMAT_CENTI_HOURS
+    return TIME_FORMAT_CENTI_HOURS
 
 
 def parse_md(path):
@@ -83,14 +94,19 @@ def parse_md(path):
     settings, body_lines = _parse_frontmatter(lines)
     settings.setdefault("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
 
-    entries = {}
+    rows = []
     for line in body_lines:
         row = _parse_table_row(line)
-        if row is None:
-            continue
-        day_key, minutes = row
-        if minutes > 0:
-            entries[day_key] = minutes_to_hours(minutes)
+        if row is not None:
+            rows.append(row)
+
+    time_format = _resolve_time_format(settings, [raw for _, raw in rows])
+    settings["time_format"] = time_format
+
+    entries = {}
+    for day_key, raw_value in rows:
+        if raw_value > 0:
+            entries[day_key] = raw_value_to_hours(raw_value, time_format)
     return entries, settings
 
 
@@ -104,6 +120,7 @@ def write_md(path, entries, settings):
     lines = [
         "---",
         f"weekly_target_hours: {weekly_target}",
+        f"time_format: {TIME_FORMAT_MINUTES}",
         f"last_updated: {last_updated}",
         "---",
         "",

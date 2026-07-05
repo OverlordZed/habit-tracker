@@ -2,10 +2,9 @@
 Type=Application
 Name=Habit Tracker
 Comment=Track daily work hours on a calendar
-Exec=/home/drzed/Applications/habit-tracker/launch.sh
-Path=/home/drzed/Applications/habit-tracker
-Icon=calendar
+Exec=APP_DIR/launch.sh
+Path=APP_DIR
+Icon=habit-tracker
 Terminal=false
 Categories=Utility;Office;
 StartupNotify=false
-X-GNOME-Autostart-enabled=true
