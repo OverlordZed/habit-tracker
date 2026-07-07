@@ -15,6 +15,34 @@ def minutes_to_hours(minutes):
     return minutes / 60
 
 
+def now_timestamp():
+    return datetime.now().astimezone().replace(microsecond=0)
+
+
+def format_timestamp(dt):
+    return dt.isoformat(timespec="seconds")
+
+
+def parse_timestamp(value):
+    cleaned = value.strip().strip('"').strip("'")
+    if " " in cleaned and "T" not in cleaned:
+        cleaned = cleaned.replace(" ", "T", 1)
+    return datetime.fromisoformat(cleaned)
+
+
+def display_timestamp(value):
+    if not value:
+        return ""
+    try:
+        dt = parse_timestamp(value).astimezone()
+        tz = dt.strftime("%z")
+        if tz:
+            tz = f" UTC{tz[:3]}:{tz[3:]}"
+        return dt.strftime("%d %b %Y %H:%M:%S") + tz
+    except ValueError:
+        return value
+
+
 def entries_equal(left, right):
     if set(left) != set(right):
         return False
@@ -22,6 +50,22 @@ def entries_equal(left, right):
         if hours_to_minutes(left[key]) != hours_to_minutes(right.get(key, 0)):
             return False
     return True
+
+
+def settings_equal_for_md(left, right):
+    return left.get("weekly_target_hours", DEFAULT_WEEKLY_TARGET) == right.get(
+        "weekly_target_hours", DEFAULT_WEEKLY_TARGET
+    )
+
+
+def md_unchanged(path, entries, settings):
+    path = Path(path)
+    if not path.exists():
+        return False
+    existing_entries, existing_settings = parse_md(path)
+    return entries_equal(entries, existing_entries) and settings_equal_for_md(
+        settings, existing_settings
+    )
 
 
 def merge_entries(local, remote):
@@ -34,6 +78,10 @@ def raw_value_to_hours(raw, time_format):
     if time_format == TIME_FORMAT_MINUTES:
         return minutes_to_hours(raw)
     return raw / 100
+
+
+def _clean_yaml_value(value):
+    return value.strip().strip('"').strip("'")
 
 
 def _parse_frontmatter(lines):
@@ -52,7 +100,7 @@ def _parse_frontmatter(lines):
             continue
         key, value = line.split(":", 1)
         key = key.strip()
-        value = value.strip()
+        value = _clean_yaml_value(value)
         if key == "weekly_target_hours":
             settings[key] = int(float(value))
         elif key == "time_format":
@@ -85,7 +133,7 @@ def _resolve_time_format(settings, raw_values):
         return time_format
     if raw_values and max(raw_values) >= 1000:
         return TIME_FORMAT_CENTI_HOURS
-    return TIME_FORMAT_CENTI_HOURS
+    return TIME_FORMAT_MINUTES
 
 
 def parse_md(path):
@@ -112,16 +160,20 @@ def parse_md(path):
 
 def write_md(path, entries, settings):
     path = Path(path)
+    if md_unchanged(path, entries, settings):
+        _, existing_settings = parse_md(path)
+        return existing_settings.get("last_updated", "")
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
     weekly_target = settings.get("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
-    last_updated = datetime.now().replace(microsecond=0).isoformat()
+    last_updated = format_timestamp(now_timestamp())
 
     lines = [
         "---",
         f"weekly_target_hours: {weekly_target}",
         f"time_format: {TIME_FORMAT_MINUTES}",
-        f"last_updated: {last_updated}",
+        f'last_updated: "{last_updated}"',
         "---",
         "",
         "# Habit Tracker",
