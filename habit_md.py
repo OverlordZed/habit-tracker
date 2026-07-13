@@ -2,6 +2,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 DEFAULT_WEEKLY_TARGET = 40
+DEFAULT_WEEKLY_GOAL = "Standards over everything"
 DEFAULT_MD_FILENAME = "Habit Tracker.md"
 TIME_FORMAT_MINUTES = "minutes"
 TIME_FORMAT_CENTI_HOURS = "centi_hours"
@@ -56,6 +57,10 @@ def _parse_frontmatter(lines):
         if key == "weekly_target_hours":
             settings[key] = int(float(value))
         elif key == "time_format":
+            settings[key] = value
+        elif key == "weekly_goal":
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
             settings[key] = value
         elif key == "last_updated":
             settings[key] = value
@@ -115,11 +120,13 @@ def write_md(path, entries, settings):
     path.parent.mkdir(parents=True, exist_ok=True)
 
     weekly_target = settings.get("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
+    weekly_goal = settings.get("weekly_goal", DEFAULT_WEEKLY_GOAL)
     last_updated = datetime.now().replace(microsecond=0).isoformat()
 
     lines = [
         "---",
         f"weekly_target_hours: {weekly_target}",
+        f'weekly_goal: "{weekly_goal.replace(chr(34), chr(92) + chr(34))}"',
         f"time_format: {TIME_FORMAT_MINUTES}",
         f"last_updated: {last_updated}",
         "---",

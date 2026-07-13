@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -28,14 +30,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from habit_md import DEFAULT_MD_FILENAME, entries_equal, merge_entries, parse_md, write_md
+from habit_md import (
+    DEFAULT_MD_FILENAME,
+    DEFAULT_WEEKLY_GOAL,
+    entries_equal,
+    merge_entries,
+    parse_md,
+    write_md,
+)
 
 DATA_DIR = Path.home() / ".local" / "share" / "habit-tracker"
 DATA_FILE = DATA_DIR / "entries.json"
 TIMER_FILE = DATA_DIR / "timer.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 CONFIG_FILE = DATA_DIR / "config.json"
+ARCHIVES_DIR = DATA_DIR / "archives"
 DEFAULT_WEEKLY_TARGET = 40
+FINANCIAL_YEAR_START_MONTH = 7
+FINANCIAL_YEAR_START_DAY = 1
 
 BG = "#1e1e2e"
 SURFACE = "#313244"
@@ -95,6 +107,7 @@ def load_legacy_settings():
     else:
         settings = {}
     settings.setdefault("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
+    settings.setdefault("weekly_goal", DEFAULT_WEEKLY_GOAL)
     return settings
 
 
@@ -117,6 +130,7 @@ def load_settings(config=None):
     else:
         settings.update(load_legacy_settings())
     settings.setdefault("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
+    settings.setdefault("weekly_goal", DEFAULT_WEEKLY_GOAL)
     return settings
 
 
@@ -131,7 +145,14 @@ def persist_data(entries, settings, config=None):
         return last_synced
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(SETTINGS_FILE, "w") as f:
-        json.dump({"weekly_target_hours": settings["weekly_target_hours"]}, f, indent=2)
+        json.dump(
+            {
+                "weekly_target_hours": settings["weekly_target_hours"],
+                "weekly_goal": settings.get("weekly_goal", DEFAULT_WEEKLY_GOAL),
+            },
+            f,
+            indent=2,
+        )
     return ""
 
 
@@ -180,6 +201,60 @@ def save_settings(settings):
 
 def date_key(d):
     return d.isoformat()
+
+
+def financial_year_start(d):
+    if d.month >= FINANCIAL_YEAR_START_MONTH:
+        return date(d.year, FINANCIAL_YEAR_START_MONTH, FINANCIAL_YEAR_START_DAY)
+    return date(d.year - 1, FINANCIAL_YEAR_START_MONTH, FINANCIAL_YEAR_START_DAY)
+
+
+def financial_year_end(fy_start):
+    return date(fy_start.year + 1, FINANCIAL_YEAR_START_MONTH, FINANCIAL_YEAR_START_DAY) - timedelta(
+        days=1
+    )
+
+
+def financial_year_label(fy_start):
+    return f"{fy_start.year}-{str(fy_start.year + 1)[-2:]}"
+
+
+def entries_for_financial_year(entries, fy_start):
+    fy_end = financial_year_end(fy_start)
+    result = {}
+    for key, hours in entries.items():
+        d = date.fromisoformat(key)
+        if fy_start <= d <= fy_end:
+            result[key] = hours
+    return result
+
+
+def entries_before_date(entries, cutoff):
+    result = {}
+    for key, hours in entries.items():
+        if date.fromisoformat(key) < cutoff:
+            result[key] = hours
+    return result
+
+
+def archive_financial_year(entries, settings, fy_start):
+    ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
+    label = financial_year_label(fy_start)
+    fy_entries = entries_for_financial_year(entries, fy_start)
+    payload = {
+        "financial_year": label,
+        "period_start": fy_start.isoformat(),
+        "period_end": financial_year_end(fy_start).isoformat(),
+        "archived_at": datetime.now().replace(microsecond=0).isoformat(),
+        "settings": settings,
+        "entries": fy_entries,
+    }
+    json_path = ARCHIVES_DIR / f"fy-{label}.json"
+    with open(json_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    md_path = ARCHIVES_DIR / f"fy-{label}.md"
+    write_md(md_path, fy_entries, settings)
+    return json_path, md_path
 
 
 def load_timer_state():
@@ -377,6 +452,47 @@ class HoursDialog(QDialog):
         return total_minutes / 60
 
 
+class ResetFinancialYearDialog(QDialog):
+    def __init__(self, previous_fy_label, current_fy_label, previous_entry_count, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reset for new financial year")
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"This will clear all habit data before the start of FY {current_fy_label} "
+                f"(1 July {current_fy_label[:4]}).\n\n"
+                f"Use this when starting a new financial year. "
+                f"This cannot be undone unless you archive first."
+            )
+        )
+
+        if previous_entry_count:
+            archive_text = (
+                f"Archive last financial year's data (FY {previous_fy_label}, "
+                f"{previous_entry_count} {'entry' if previous_entry_count == 1 else 'entries'})"
+            )
+        else:
+            archive_text = (
+                f"Archive last financial year's data (FY {previous_fy_label}, no entries)"
+            )
+
+        self.archive_checkbox = QCheckBox(archive_text)
+        self.archive_checkbox.setChecked(True)
+        layout.addWidget(self.archive_checkbox)
+
+        buttons = QDialogButtonBox()
+        reset_btn = buttons.addButton("Reset data", QDialogButtonBox.DestructiveRole)
+        cancel_btn = buttons.addButton(QDialogButtonBox.Cancel)
+        reset_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def archive_previous_year(self):
+        return self.archive_checkbox.isChecked()
+
+
 class DayButton(QPushButton):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -402,7 +518,7 @@ class HabitTracker(QMainWindow):
         self.day_buttons = []
         self.timer_started_at = None
         self.timer_day = None
-        self.plot_scope = "year"
+        self.plot_scope = "week"
 
         self.tick_timer = QTimer(self)
         self.tick_timer.setInterval(1000)
@@ -422,6 +538,27 @@ class HabitTracker(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(8)
+
+        self.goal_banner = QWidget()
+        self.goal_banner.setObjectName("goal-banner")
+        banner_layout = QVBoxLayout(self.goal_banner)
+        banner_layout.setContentsMargins(14, 10, 14, 10)
+        banner_layout.setSpacing(4)
+
+        goal_caption = QLabel("Weekly goal")
+        goal_caption.setAlignment(Qt.AlignCenter)
+        goal_caption.setObjectName("goal-caption")
+        banner_layout.addWidget(goal_caption)
+
+        self.weekly_goal_input = QLineEdit()
+        self.weekly_goal_input.setObjectName("goal-input")
+        self.weekly_goal_input.setAlignment(Qt.AlignCenter)
+        self.weekly_goal_input.setFont(QFont("Sans", 14, QFont.Bold))
+        self.weekly_goal_input.setPlaceholderText(DEFAULT_WEEKLY_GOAL)
+        self.weekly_goal_input.setText(self.settings.get("weekly_goal", DEFAULT_WEEKLY_GOAL))
+        self.weekly_goal_input.editingFinished.connect(self._on_weekly_goal_changed)
+        banner_layout.addWidget(self.weekly_goal_input)
+        root.addWidget(self.goal_banner)
 
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -499,8 +636,10 @@ class HabitTracker(QMainWindow):
         calendar_layout.addLayout(timer_row)
 
         self.plot_tabs = QTabWidget()
+        self.plot_tabs.addTab(QWidget(), "Week")
         self.plot_tabs.addTab(QWidget(), "Year to date")
         self.plot_tabs.addTab(QWidget(), "Month")
+        self.plot_tabs.setCurrentIndex(0)
         self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
         calendar_layout.addWidget(self.plot_tabs)
 
@@ -574,6 +713,22 @@ class HabitTracker(QMainWindow):
         stats_layout.addWidget(self.sync_status_label)
         self._update_sync_status()
 
+        fy_label = QLabel("Financial year")
+        fy_label.setStyleSheet(f"color: {TEXT_MUTED}; font-weight: bold;")
+        stats_layout.addWidget(fy_label)
+
+        self.fy_status_label = QLabel()
+        self.fy_status_label.setStyleSheet(f"color: {TEXT_DIM};")
+        stats_layout.addWidget(self.fy_status_label)
+        self._update_financial_year_status()
+
+        reset_fy_row = QHBoxLayout()
+        self.reset_fy_btn = QPushButton("Reset for new financial year")
+        self.reset_fy_btn.clicked.connect(self._reset_financial_year)
+        reset_fy_row.addWidget(self.reset_fy_btn)
+        reset_fy_row.addStretch()
+        stats_layout.addLayout(reset_fy_row)
+
         self.month_figure = Figure(figsize=(6, 2.2), dpi=100, facecolor=BG)
         self.month_ax = self.month_figure.add_subplot(111)
         self.month_canvas = FigureCanvasQTAgg(self.month_figure)
@@ -613,6 +768,11 @@ class HabitTracker(QMainWindow):
                 color: {BG};
                 font-weight: bold;
             }}
+            QPushButton#reset-fy {{
+                background-color: {TIMER_STOP};
+                color: {BG};
+                font-weight: bold;
+            }}
             QLabel {{
                 color: {TEXT};
             }}
@@ -628,6 +788,21 @@ class HabitTracker(QMainWindow):
                 border: 1px solid {SURFACE_ALT};
                 padding: 6px;
                 border-radius: 4px;
+            }}
+            QWidget#goal-banner {{
+                background-color: {SURFACE_ALT};
+                border: 1px solid {ACCENT};
+                border-radius: 8px;
+            }}
+            QLabel#goal-caption {{
+                color: {TEXT_DIM};
+                font-size: 11px;
+            }}
+            QLineEdit#goal-input {{
+                background-color: transparent;
+                border: none;
+                color: {TEXT};
+                padding: 2px 4px;
             }}
             QTabWidget::pane {{
                 border: none;
@@ -658,6 +833,81 @@ class HabitTracker(QMainWindow):
         today_btn.setObjectName("today")
         self.start_timer_btn.setObjectName("start-timer")
         self.stop_timer_btn.setObjectName("stop-timer")
+        self.reset_fy_btn.setObjectName("reset-fy")
+
+    def _update_financial_year_status(self):
+        today = date.today()
+        current_fy_start = financial_year_start(today)
+        current_fy_label = financial_year_label(current_fy_start)
+        previous_fy_start = date(current_fy_start.year - 1, FINANCIAL_YEAR_START_MONTH, FINANCIAL_YEAR_START_DAY)
+        previous_entries = entries_for_financial_year(self.entries, previous_fy_start)
+        current_entries = entries_for_financial_year(self.entries, current_fy_start)
+        self.fy_status_label.setText(
+            f"Current FY {current_fy_label}: {len(current_entries)} "
+            f"{'entry' if len(current_entries) == 1 else 'entries'}  |  "
+            f"Previous FY {financial_year_label(previous_fy_start)}: {len(previous_entries)} "
+            f"{'entry' if len(previous_entries) == 1 else 'entries'}"
+        )
+
+    def _reset_financial_year(self):
+        today = date.today()
+        current_fy_start = financial_year_start(today)
+        current_fy_label = financial_year_label(current_fy_start)
+        previous_fy_start = date(
+            current_fy_start.year - 1, FINANCIAL_YEAR_START_MONTH, FINANCIAL_YEAR_START_DAY
+        )
+        previous_fy_label = financial_year_label(previous_fy_start)
+        previous_entries = entries_for_financial_year(self.entries, previous_fy_start)
+        entries_to_clear = entries_before_date(self.entries, current_fy_start)
+
+        if not entries_to_clear:
+            QMessageBox.information(
+                self,
+                "Nothing to reset",
+                f"There is no data before the start of FY {current_fy_label}.",
+            )
+            return
+
+        dialog = ResetFinancialYearDialog(
+            previous_fy_label,
+            current_fy_label,
+            len(previous_entries),
+            self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        if self.timer_started_at is not None:
+            self._stop_timer()
+
+        archive_paths = None
+        if dialog.archive_previous_year():
+            archive_paths = archive_financial_year(
+                self.entries, self.settings, previous_fy_start
+            )
+
+        self.entries = {
+            key: hours
+            for key, hours in self.entries.items()
+            if date.fromisoformat(key) >= current_fy_start
+        }
+        self._persist_data()
+        self._refresh_calendar()
+        self._refresh_plot()
+        self._refresh_stats()
+        self._update_financial_year_status()
+
+        cleared_count = len(entries_to_clear)
+        message = (
+            f"Cleared {cleared_count} "
+            f"{'entry' if cleared_count == 1 else 'entries'} before FY {current_fy_label}."
+        )
+        if archive_paths:
+            message += (
+                f"\n\nArchived FY {previous_fy_label} to:\n"
+                f"{archive_paths[0]}\n{archive_paths[1]}"
+            )
+        QMessageBox.information(self, "Financial year reset", message)
 
     def _restore_timer_state(self):
         started_at, day = load_timer_state()
@@ -746,7 +996,7 @@ class HabitTracker(QMainWindow):
             self._refresh_plot()
 
     def _on_plot_tab_changed(self, index):
-        self.plot_scope = "year" if index == 0 else "month"
+        self.plot_scope = ("week", "year", "month")[index]
         self._refresh_plot()
 
     def _go_today(self):
@@ -786,12 +1036,17 @@ class HabitTracker(QMainWindow):
     def _on_tab_changed(self, index):
         if self.tabs.tabText(index) == "Stats":
             self._refresh_stats()
+            self._update_financial_year_status()
 
     def _on_weekly_target_changed(self, value):
         self.settings["weekly_target_hours"] = value
         self._persist_data()
         self._refresh_plot()
         self._refresh_stats()
+
+    def _on_weekly_goal_changed(self):
+        self.settings["weekly_goal"] = self.weekly_goal_input.text().strip()
+        self._persist_data()
 
     def _md_path(self):
         return get_md_path(self.config)
@@ -833,6 +1088,7 @@ class HabitTracker(QMainWindow):
         save_config(self.config)
         self.entries, self.settings, self.last_synced = startup_sync(self.config)
         self.weekly_target_spin.setValue(self.settings["weekly_target_hours"])
+        self.weekly_goal_input.setText(self.settings.get("weekly_goal", DEFAULT_WEEKLY_GOAL))
         self._refresh_calendar()
         self._refresh_plot()
         self._refresh_stats()
@@ -862,6 +1118,9 @@ class HabitTracker(QMainWindow):
         if remote_settings.get("weekly_target_hours"):
             self.settings["weekly_target_hours"] = remote_settings["weekly_target_hours"]
             self.weekly_target_spin.setValue(self.settings["weekly_target_hours"])
+        if "weekly_goal" in remote_settings:
+            self.settings["weekly_goal"] = remote_settings["weekly_goal"]
+            self.weekly_goal_input.setText(self.settings["weekly_goal"])
         self._persist_data()
         self._refresh_calendar()
         self._refresh_plot()
@@ -970,9 +1229,15 @@ class HabitTracker(QMainWindow):
     def _plot_entries(self):
         today = date.today()
         filtered = []
+        if self.plot_scope == "week":
+            iso_year, iso_week, _ = today.isocalendar()
         for key in sorted(self.entries.keys()):
             d = date.fromisoformat(key)
-            if self.plot_scope == "year":
+            if self.plot_scope == "week":
+                d_iso_year, d_iso_week, _ = d.isocalendar()
+                if d_iso_year == iso_year and d_iso_week == iso_week:
+                    filtered.append((key, self.entries[key]))
+            elif self.plot_scope == "year":
                 if d.year == today.year:
                     filtered.append((key, self.entries[key]))
             elif d.year == self.view_year and d.month == self.view_month:
@@ -980,6 +1245,14 @@ class HabitTracker(QMainWindow):
         return filtered
 
     def _plot_title(self):
+        if self.plot_scope == "week":
+            today = date.today()
+            iso_week = today.isocalendar()[1]
+            monday = today - timedelta(days=today.weekday())
+            sunday = monday + timedelta(days=6)
+            return (
+                f"Week {iso_week} ({monday.strftime('%d %b')} – {sunday.strftime('%d %b')})"
+            )
         if self.plot_scope == "year":
             return f"{date.today().year} year to date"
         return datetime(self.view_year, self.view_month, 1).strftime("%B %Y")
@@ -993,6 +1266,8 @@ class HabitTracker(QMainWindow):
     def _plot_expected_total(self):
         weekly_target = self._weekly_target()
         today = date.today()
+        if self.plot_scope == "week":
+            return weekly_target
         if self.plot_scope == "year":
             return weekly_target * iso_weeks_so_far_in_year(today.year, today)
         return weekly_target * iso_weeks_in_month(self.view_year, self.view_month)
@@ -1039,11 +1314,11 @@ class HabitTracker(QMainWindow):
 
         plot_data = self._plot_entries()
         if not plot_data:
-            empty_msg = (
-                "No data for this year yet"
-                if self.plot_scope == "year"
-                else "No data for this month yet"
-            )
+            empty_msg = {
+                "week": "No data for this week yet",
+                "year": "No data for this year yet",
+                "month": "No data for this month yet",
+            }[self.plot_scope]
             self.ax.text(
                 0.5,
                 0.5,
