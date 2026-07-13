@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from habit_md import (
     DEFAULT_MD_FILENAME,
     DEFAULT_WEEKLY_GOAL,
+    display_timestamp,
     entries_equal,
     merge_entries,
     parse_md,
@@ -1060,12 +1061,17 @@ class HabitTracker(QMainWindow):
         if not md_path:
             self.sync_status_label.setText("Vault path not set — using local entries.json")
             return
-        if self.last_synced:
+
+        timestamp = self.last_synced
+        if md_path.exists():
             try:
-                synced = datetime.fromisoformat(self.last_synced)
-                label = synced.strftime("%d %b %Y %H:%M")
-            except ValueError:
-                label = self.last_synced
+                _, md_settings = parse_md(md_path)
+                timestamp = md_settings.get("last_updated", timestamp) or timestamp
+            except OSError:
+                pass
+
+        if timestamp:
+            label = display_timestamp(timestamp)
             self.sync_status_label.setText(f"Last synced: {label}  →  {md_path}")
         else:
             self.sync_status_label.setText(f"Vault file: {md_path}")
