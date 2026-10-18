@@ -1,4 +1,5 @@
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 DEFAULT_WEEKLY_TARGET = 40
@@ -8,6 +9,8 @@ DEFAULT_MARK_RED_LABEL = "Red"
 DEFAULT_MD_FILENAME = "Habit Tracker.md"
 TIME_FORMAT_MINUTES = "minutes"
 TIME_FORMAT_CENTI_HOURS = "centi_hours"
+WEEK_KEY_RE = re.compile(r"^(\d{4})-W(\d{2})$")
+WEEK_HEADING_RE = re.compile(r"^###\s+(\d{4}-W\d{2})\b")
 
 
 def hours_to_minutes(hours):
@@ -53,6 +56,98 @@ def _yaml_quoted(value):
 def _mark_label(settings, key, default):
     value = str(settings.get(key, default) or "").strip()
     return value or default
+
+
+def iso_week_key(d):
+    iso_year, iso_week, _ = d.isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
+
+
+def iso_week_monday(key):
+    match = WEEK_KEY_RE.match(str(key or ""))
+    if not match:
+        raise ValueError(key)
+    return date.fromisocalendar(int(match.group(1)), int(match.group(2)), 1)
+
+
+def iso_week_range_label(key):
+    monday = iso_week_monday(key)
+    sunday = monday + timedelta(days=6)
+    return f"{monday.strftime('%d %b')} – {sunday.strftime('%d %b')}"
+
+
+def monday_of(d):
+    return d - timedelta(days=d.weekday())
+
+
+def previous_iso_week_key(key):
+    return iso_week_key(iso_week_monday(key) - timedelta(days=7))
+
+
+def _valid_week_key(key):
+    match = WEEK_KEY_RE.match(str(key or ""))
+    if not match:
+        return False
+    try:
+        date.fromisocalendar(int(match.group(1)), int(match.group(2)), 1)
+    except ValueError:
+        return False
+    return True
+
+
+def normalise_weekly_goals(goals):
+    if not isinstance(goals, dict):
+        return {}
+    result = {}
+    for key, items in goals.items():
+        if not _valid_week_key(key):
+            continue
+        cleaned = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").replace("|", "/").strip()
+            if not title:
+                continue
+            try:
+                progress = int(round(float(item.get("progress") or 0)))
+            except (TypeError, ValueError):
+                progress = 0
+            cleaned.append({"title": title, "progress": max(0, min(100, progress))})
+        if cleaned:
+            result[key] = cleaned
+    return result
+
+
+def merge_weekly_goals(local, remote):
+    merged = normalise_weekly_goals(local)
+    merged.update(normalise_weekly_goals(remote))
+    return merged
+
+
+def weekly_goals_for_financial_year(goals, fy_start, fy_end):
+    result = {}
+    for key, items in normalise_weekly_goals(goals).items():
+        monday = iso_week_monday(key)
+        if fy_start <= monday <= fy_end:
+            result[key] = items
+    return result
+
+
+def weekly_goals_before_date(goals, cutoff):
+    result = {}
+    for key, items in normalise_weekly_goals(goals).items():
+        if iso_week_monday(key) < cutoff:
+            result[key] = items
+    return result
+
+
+def weekly_goals_on_or_after(goals, cutoff):
+    result = {}
+    for key, items in normalise_weekly_goals(goals).items():
+        if iso_week_monday(key) >= cutoff:
+            result[key] = items
+    return result
 
 
 def normalise_entries(entries):
@@ -120,7 +215,9 @@ def settings_equal_for_md(left, right):
         right, "mark_red_label", DEFAULT_MARK_RED_LABEL
     ):
         return False
-    return True
+    return normalise_weekly_goals(left.get("weekly_goals")) == normalise_weekly_goals(
+        right.get("weekly_goals")
+    )
 
 
 def md_unchanged(path, entries, settings):
@@ -179,6 +276,59 @@ def _parse_frontmatter(lines):
     return settings, lines[end + 1 :]
 
 
+def _split_hours_and_goals(body_lines):
+    hours_lines = []
+    goals_lines = []
+    in_goals = False
+    for line in body_lines:
+        if line.strip().lower() == "## goals":
+            in_goals = True
+            continue
+        if in_goals:
+            goals_lines.append(line)
+        else:
+            hours_lines.append(line)
+    return hours_lines, goals_lines
+
+
+def _parse_goal_row(line):
+    line = line.strip()
+    if not line.startswith("|"):
+        return None
+    parts = [part.strip() for part in line.strip("|").split("|")]
+    if len(parts) < 2:
+        return None
+    if parts[0].lower() in {"goal", "date"} or set(parts[0]) <= {"-"}:
+        return None
+    title = parts[0].replace("|", "/").strip()
+    if not title:
+        return None
+    try:
+        progress = int(round(float(str(parts[1]).rstrip("%"))))
+    except ValueError:
+        return None
+    return title, max(0, min(100, progress))
+
+
+def parse_weekly_goals(body_lines):
+    _, goals_lines = _split_hours_and_goals(body_lines)
+    goals = {}
+    current = None
+    for line in goals_lines:
+        heading = WEEK_HEADING_RE.match(line.strip())
+        if heading:
+            current = heading.group(1)
+            goals.setdefault(current, [])
+            continue
+        if current is None:
+            continue
+        row = _parse_goal_row(line)
+        if row is not None:
+            title, progress = row
+            goals[current].append({"title": title, "progress": progress})
+    return normalise_weekly_goals(goals)
+
+
 def _parse_table_row(line):
     line = line.strip()
     if not line.startswith("|"):
@@ -218,9 +368,11 @@ def parse_md(path):
     settings.setdefault("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
     settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
     settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
+    settings["weekly_goals"] = parse_weekly_goals(body_lines)
 
+    hours_lines, _ = _split_hours_and_goals(body_lines)
     rows = []
-    for line in body_lines:
+    for line in hours_lines:
         row = _parse_table_row(line)
         if row is not None:
             rows.append(row)
@@ -250,6 +402,7 @@ def write_md(path, entries, settings):
     red_label = _mark_label(settings, "mark_red_label", DEFAULT_MARK_RED_LABEL)
     last_updated = format_timestamp(now_timestamp())
     packed = normalise_entries(entries)
+    weekly_goals = normalise_weekly_goals(settings.get("weekly_goals"))
 
     lines = [
         "---",
@@ -274,6 +427,18 @@ def write_md(path, entries, settings):
             red = 1 if item["red"] else 0
             lines.append(f"| {day_key} | {minutes} | {green} | {red} |")
     lines.append("")
+
+    if weekly_goals:
+        lines.append("## Goals")
+        lines.append("")
+        for week_key in sorted(weekly_goals):
+            lines.append(f"### {week_key} ({iso_week_range_label(week_key)})")
+            lines.append("")
+            lines.append("| Goal | Progress |")
+            lines.append("|------|----------|")
+            for item in weekly_goals[week_key]:
+                lines.append(f"| {item['title']} | {item['progress']} |")
+            lines.append("")
 
     path.write_text("\n".join(lines))
     return last_updated

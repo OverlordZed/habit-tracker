@@ -9,14 +9,15 @@ from pathlib import Path
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.gridspec import GridSpec
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QFont
+from PySide6.QtCore import Qt, QRect, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QColor, QFont, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTabWidget,
@@ -39,10 +41,19 @@ from habit_md import (
     combine_entries,
     display_timestamp,
     entries_equal,
+    iso_week_key,
+    iso_week_range_label,
     merge_entries,
+    merge_weekly_goals,
+    monday_of,
     normalise_entries,
+    normalise_weekly_goals,
     parse_md,
+    previous_iso_week_key,
     split_entries,
+    weekly_goals_before_date,
+    weekly_goals_for_financial_year,
+    weekly_goals_on_or_after,
     write_md,
 )
 
@@ -123,6 +134,7 @@ def load_legacy_settings():
     settings.setdefault("weekly_goal", DEFAULT_WEEKLY_GOAL)
     settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
     settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
+    settings["weekly_goals"] = normalise_weekly_goals(settings.get("weekly_goals"))
     return settings
 
 
@@ -148,6 +160,7 @@ def load_settings(config=None):
     settings.setdefault("weekly_goal", DEFAULT_WEEKLY_GOAL)
     settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
     settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
+    settings["weekly_goals"] = normalise_weekly_goals(settings.get("weekly_goals"))
     return settings
 
 
@@ -169,6 +182,7 @@ def persist_data(entries, settings, config=None):
                 "weekly_goal": settings.get("weekly_goal", DEFAULT_WEEKLY_GOAL),
                 "mark_green_label": settings.get("mark_green_label", DEFAULT_MARK_GREEN_LABEL),
                 "mark_red_label": settings.get("mark_red_label", DEFAULT_MARK_RED_LABEL),
+                "weekly_goals": normalise_weekly_goals(settings.get("weekly_goals")),
             },
             f,
             indent=2,
@@ -187,7 +201,11 @@ def startup_sync(config):
     settings = load_legacy_settings()
     if md_path and md_path.exists():
         remote_entries, remote_settings = parse_md(md_path)
+        local_goals = settings.get("weekly_goals", {})
         settings.update(remote_settings)
+        settings["weekly_goals"] = merge_weekly_goals(
+            local_goals, remote_settings.get("weekly_goals")
+        )
         if entries_equal(local_entries, remote_entries):
             merged = normalise_entries(remote_entries)
         else:
@@ -260,20 +278,25 @@ def entries_before_date(entries, cutoff):
 def archive_financial_year(entries, settings, fy_start):
     ARCHIVES_DIR.mkdir(parents=True, exist_ok=True)
     label = financial_year_label(fy_start)
+    fy_end = financial_year_end(fy_start)
     fy_entries = entries_for_financial_year(entries, fy_start)
+    archive_settings = dict(settings)
+    archive_settings["weekly_goals"] = weekly_goals_for_financial_year(
+        settings.get("weekly_goals"), fy_start, fy_end
+    )
     payload = {
         "financial_year": label,
         "period_start": fy_start.isoformat(),
-        "period_end": financial_year_end(fy_start).isoformat(),
+        "period_end": fy_end.isoformat(),
         "archived_at": datetime.now().replace(microsecond=0).isoformat(),
-        "settings": settings,
+        "settings": archive_settings,
         "entries": fy_entries,
     }
     json_path = ARCHIVES_DIR / f"fy-{label}.json"
     with open(json_path, "w") as f:
         json.dump(payload, f, indent=2)
     md_path = ARCHIVES_DIR / f"fy-{label}.md"
-    write_md(md_path, fy_entries, settings)
+    write_md(md_path, fy_entries, archive_settings)
     return json_path, md_path
 
 
@@ -557,6 +580,116 @@ class DayCell(QWidget):
             btn.setToolTip("")
 
 
+class GoalProgressBar(QWidget):
+    valueChanged = Signal(int)
+    editingFinished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._value = 0
+        self.setMinimumSize(140, 24)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def value(self):
+        return self._value
+
+    def setValue(self, value):
+        value = max(0, min(100, int(value)))
+        if value == self._value:
+            return
+        self._value = value
+        self.update()
+        self.valueChanged.emit(value)
+
+    def _set_from_pos(self, x):
+        width = max(1, self.width())
+        self.setValue(round(100 * x / width))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._set_from_pos(event.position().x())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton:
+            self._set_from_pos(event.position().x())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.editingFinished.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Left:
+            self.setValue(self._value - 5)
+            self.editingFinished.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Right:
+            self.setValue(self._value + 5)
+            self.editingFinished.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(1, 3, -1, -3)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 6, 6)
+        painter.setClipPath(path)
+        painter.fillRect(rect, QColor(SURFACE))
+        if self._value > 0:
+            fill_width = max(1, int(rect.width() * self._value / 100))
+            fill = QRect(rect.x(), rect.y(), fill_width, rect.height())
+            painter.fillRect(fill, QColor(ACCENT))
+        painter.setClipping(False)
+        painter.setPen(QColor(TEXT))
+        painter.drawText(rect, Qt.AlignCenter, f"{self._value}%")
+
+
+class GoalRow(QWidget):
+    changed = Signal()
+    removed = Signal(object)
+
+    def __init__(self, title="", progress=0, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText("Goal")
+        self.title_input.setText(title)
+        self.title_input.editingFinished.connect(self.changed.emit)
+        layout.addWidget(self.title_input, stretch=3)
+
+        self.bar = GoalProgressBar()
+        self.bar.setValue(progress)
+        self.bar.editingFinished.connect(self.changed.emit)
+        layout.addWidget(self.bar, stretch=2)
+
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(lambda: self.removed.emit(self))
+        layout.addWidget(remove_btn)
+
+    def title(self):
+        return self.title_input.text().strip()
+
+    def progress(self):
+        return self.bar.value()
+
+
 class HabitTracker(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -575,6 +708,9 @@ class HabitTracker(QMainWindow):
         self.timer_started_at = None
         self.timer_day = None
         self.plot_scope = "week"
+        self.goals_week_monday = monday_of(today)
+        self.goals_follow_current = True
+        self.goal_rows = []
 
         self.tick_timer = QTimer(self)
         self.tick_timer.setInterval(1000)
@@ -585,6 +721,7 @@ class HabitTracker(QMainWindow):
         self._refresh_calendar()
         self._refresh_plot()
         self._refresh_stats()
+        self._refresh_goals()
 
     def _build_ui(self):
         central = QWidget()
@@ -746,6 +883,69 @@ class HabitTracker(QMainWindow):
         calendar_layout.addWidget(self.canvas, stretch=1)
 
         self.tabs.addTab(calendar_tab, "Calendar")
+
+        goals_tab = QWidget()
+        goals_layout = QVBoxLayout(goals_tab)
+        goals_layout.setContentsMargins(0, 0, 0, 0)
+        goals_layout.setSpacing(8)
+
+        goals_header = QHBoxLayout()
+        prev_week_btn = QPushButton("◀")
+        prev_week_btn.setFixedWidth(40)
+        prev_week_btn.clicked.connect(self._prev_goals_week)
+        goals_header.addWidget(prev_week_btn)
+
+        self.goals_week_label = QLabel()
+        self.goals_week_label.setAlignment(Qt.AlignCenter)
+        self.goals_week_label.setFont(QFont("Sans", 16, QFont.Bold))
+        goals_header.addWidget(self.goals_week_label, stretch=1)
+
+        this_week_btn = QPushButton("This week")
+        this_week_btn.setObjectName("today")
+        this_week_btn.clicked.connect(self._go_this_goals_week)
+        goals_header.addWidget(this_week_btn)
+
+        next_week_btn = QPushButton("▶")
+        next_week_btn.setFixedWidth(40)
+        next_week_btn.clicked.connect(self._next_goals_week)
+        goals_header.addWidget(next_week_btn)
+        goals_layout.addLayout(goals_header)
+
+        goals_meta = QHBoxLayout()
+        self.goals_summary_label = QLabel()
+        self.goals_summary_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        goals_meta.addWidget(self.goals_summary_label, stretch=1)
+        self.copy_unfinished_btn = QPushButton("Copy last week's unfinished")
+        self.copy_unfinished_btn.clicked.connect(self._copy_last_week_unfinished)
+        goals_meta.addWidget(self.copy_unfinished_btn)
+        goals_layout.addLayout(goals_meta)
+
+        self.goals_empty_label = QLabel("No goals for this week yet")
+        self.goals_empty_label.setAlignment(Qt.AlignCenter)
+        self.goals_empty_label.setStyleSheet(f"color: {TEXT_DIM};")
+        goals_layout.addWidget(self.goals_empty_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet(f"QScrollArea {{ background-color: {BG}; border: none; }}")
+        list_host = QWidget()
+        list_host.setStyleSheet(f"background-color: {BG};")
+        self.goals_list = QVBoxLayout(list_host)
+        self.goals_list.setContentsMargins(0, 0, 0, 0)
+        self.goals_list.setSpacing(8)
+        self.goals_list.addStretch()
+        scroll.setWidget(list_host)
+        goals_layout.addWidget(scroll, stretch=1)
+
+        add_row = QHBoxLayout()
+        add_goal_btn = QPushButton("Add goal")
+        add_goal_btn.clicked.connect(self._add_goal)
+        add_row.addWidget(add_goal_btn)
+        add_row.addStretch()
+        goals_layout.addLayout(add_row)
+
+        self.tabs.addTab(goals_tab, "Goals")
 
         stats_tab = QWidget()
         stats_layout = QVBoxLayout(stats_tab)
@@ -956,8 +1156,11 @@ class HabitTracker(QMainWindow):
         stored = self._stored_entries()
         previous_entries = entries_for_financial_year(stored, previous_fy_start)
         entries_to_clear = entries_before_date(stored, current_fy_start)
+        goals_to_clear = weekly_goals_before_date(
+            self.settings.get("weekly_goals"), current_fy_start
+        )
 
-        if not entries_to_clear:
+        if not entries_to_clear and not goals_to_clear:
             QMessageBox.information(
                 self,
                 "Nothing to reset",
@@ -991,10 +1194,14 @@ class HabitTracker(QMainWindow):
             if date.fromisoformat(key) >= current_fy_start
         }
         self.entries, self.marks = split_entries(kept)
+        self.settings["weekly_goals"] = weekly_goals_on_or_after(
+            self.settings.get("weekly_goals"), current_fy_start
+        )
         self._persist_data()
         self._refresh_calendar()
         self._refresh_plot()
         self._refresh_stats()
+        self._refresh_goals()
         self._update_financial_year_status()
 
         cleared_count = len(entries_to_clear)
@@ -1002,6 +1209,12 @@ class HabitTracker(QMainWindow):
             f"Cleared {cleared_count} "
             f"{'entry' if cleared_count == 1 else 'entries'} before FY {current_fy_label}."
         )
+        if goals_to_clear:
+            week_count = len(goals_to_clear)
+            message += (
+                f" Cleared {week_count} "
+                f"{'week' if week_count == 1 else 'weeks'} of goals."
+            )
         if archive_paths:
             message += (
                 f"\n\nArchived FY {previous_fy_label} to:\n"
@@ -1153,9 +1366,139 @@ class HabitTracker(QMainWindow):
         self._refresh_calendar()
 
     def _on_tab_changed(self, index):
-        if self.tabs.tabText(index) == "Stats":
+        name = self.tabs.tabText(index)
+        if name == "Stats":
             self._refresh_stats()
             self._update_financial_year_status()
+        elif name == "Goals":
+            self._refresh_goals()
+
+    def _goals_week_key(self):
+        return iso_week_key(self.goals_week_monday)
+
+    def _clear_goal_rows(self):
+        while self.goals_list.count() > 1:
+            item = self.goals_list.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.goal_rows = []
+
+    def _insert_goal_row(self, title, progress, focus=False):
+        row = GoalRow(title, progress)
+        row.changed.connect(self._on_goal_row_changed)
+        row.removed.connect(self._on_goal_row_removed)
+        self.goals_list.insertWidget(self.goals_list.count() - 1, row)
+        self.goal_rows.append(row)
+        if focus:
+            row.title_input.setFocus()
+            row.title_input.selectAll()
+        return row
+
+    def _update_goals_summary(self):
+        titled = [row for row in self.goal_rows if row.title()]
+        total = len(titled)
+        complete = sum(1 for row in titled if row.progress() == 100)
+        if total:
+            mean = round(sum(row.progress() for row in titled) / total)
+            self.goals_summary_label.setText(
+                f"{complete} of {total} complete  ·  {mean}% average"
+            )
+        else:
+            self.goals_summary_label.setText("0 of 0 complete")
+        self.goals_empty_label.setVisible(len(self.goal_rows) == 0)
+        current_titles = {row.title() for row in titled}
+        prev_key = previous_iso_week_key(self._goals_week_key())
+        unfinished = [
+            item
+            for item in normalise_weekly_goals(self.settings.get("weekly_goals")).get(
+                prev_key, []
+            )
+            if item["progress"] < 100 and item["title"] not in current_titles
+        ]
+        self.copy_unfinished_btn.setEnabled(bool(unfinished))
+
+    def _refresh_goals(self):
+        if self.goals_follow_current:
+            self.goals_week_monday = monday_of(date.today())
+        key = self._goals_week_key()
+        week_num = self.goals_week_monday.isocalendar()[1]
+        self.goals_week_label.setText(f"Week {week_num} ({iso_week_range_label(key)})")
+        items = normalise_weekly_goals(self.settings.get("weekly_goals")).get(key, [])
+        self._clear_goal_rows()
+        for item in items:
+            self._insert_goal_row(item["title"], item["progress"])
+        self._update_goals_summary()
+
+    def _collect_goal_rows(self):
+        return [
+            {"title": row.title(), "progress": row.progress()}
+            for row in self.goal_rows
+            if row.title()
+        ]
+
+    def _save_goal_rows(self):
+        key = self._goals_week_key()
+        goals = normalise_weekly_goals(self.settings.get("weekly_goals"))
+        items = self._collect_goal_rows()
+        if items:
+            goals[key] = items
+        else:
+            goals.pop(key, None)
+        self.settings["weekly_goals"] = goals
+        self._persist_data()
+        self._update_goals_summary()
+
+    def _add_goal(self):
+        self._insert_goal_row("", 0, focus=True)
+        self._update_goals_summary()
+
+    def _on_goal_row_changed(self):
+        self._save_goal_rows()
+
+    def _on_goal_row_removed(self, row):
+        if row in self.goal_rows:
+            self.goal_rows.remove(row)
+        self.goals_list.removeWidget(row)
+        row.deleteLater()
+        self._save_goal_rows()
+
+    def _prev_goals_week(self):
+        self.goals_follow_current = False
+        self.goals_week_monday -= timedelta(days=7)
+        self._refresh_goals()
+
+    def _next_goals_week(self):
+        self.goals_follow_current = False
+        self.goals_week_monday += timedelta(days=7)
+        self._refresh_goals()
+
+    def _go_this_goals_week(self):
+        self.goals_follow_current = True
+        self.goals_week_monday = monday_of(date.today())
+        self._refresh_goals()
+
+    def _copy_last_week_unfinished(self):
+        key = self._goals_week_key()
+        prev_key = previous_iso_week_key(key)
+        goals = normalise_weekly_goals(self.settings.get("weekly_goals"))
+        unfinished = [item for item in goals.get(prev_key, []) if item["progress"] < 100]
+        if not unfinished:
+            return
+        current = list(goals.get(key, []))
+        titles = {item["title"] for item in current}
+        changed = False
+        for item in unfinished:
+            if item["title"] not in titles:
+                current.append({"title": item["title"], "progress": 0})
+                titles.add(item["title"])
+                changed = True
+        if not changed:
+            return
+        goals[key] = current
+        self.settings["weekly_goals"] = goals
+        self._persist_data()
+        self._refresh_goals()
 
     def _on_weekly_target_changed(self, value):
         self.settings["weekly_target_hours"] = value
@@ -1243,6 +1586,7 @@ class HabitTracker(QMainWindow):
         self._refresh_calendar()
         self._refresh_plot()
         self._refresh_stats()
+        self._refresh_goals()
         self._update_sync_status()
 
     def _import_now(self):
@@ -1283,10 +1627,14 @@ class HabitTracker(QMainWindow):
                 remote_settings["mark_red_label"] or DEFAULT_MARK_RED_LABEL
             )
             self.mark_red_input.setText(self.settings["mark_red_label"])
+        self.settings["weekly_goals"] = merge_weekly_goals(
+            self.settings.get("weekly_goals"), remote_settings.get("weekly_goals")
+        )
         self._persist_data()
         self._refresh_calendar()
         self._refresh_plot()
         self._refresh_stats()
+        self._refresh_goals()
 
     def _export_now(self):
         md_path = self._md_path()
