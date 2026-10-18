@@ -3,6 +3,8 @@ from pathlib import Path
 
 DEFAULT_WEEKLY_TARGET = 40
 DEFAULT_WEEKLY_GOAL = "Standards over everything"
+DEFAULT_MARK_GREEN_LABEL = "Green"
+DEFAULT_MARK_RED_LABEL = "Red"
 DEFAULT_MD_FILENAME = "Habit Tracker.md"
 TIME_FORMAT_MINUTES = "minutes"
 TIME_FORMAT_CENTI_HOURS = "centi_hours"
@@ -44,19 +46,81 @@ def display_timestamp(value):
         return value
 
 
+def _yaml_quoted(value):
+    return '"' + str(value).replace('"', '\\"') + '"'
+
+
+def _mark_label(settings, key, default):
+    value = str(settings.get(key, default) or "").strip()
+    return value or default
+
+
+def normalise_entries(entries):
+    packed = {}
+    for key, value in entries.items():
+        if isinstance(value, dict):
+            hours = float(value.get("hours") or 0)
+            green = bool(value.get("green"))
+            red = bool(value.get("red"))
+        else:
+            hours = float(value or 0)
+            green = False
+            red = False
+        if hours or green or red:
+            packed[key] = {"hours": hours, "green": green, "red": red}
+    return packed
+
+
+def split_entries(entries):
+    hours = {}
+    marks = {}
+    for key, item in normalise_entries(entries).items():
+        if item["hours"]:
+            hours[key] = item["hours"]
+        if item["green"] or item["red"]:
+            marks[key] = {"green": item["green"], "red": item["red"]}
+    return hours, marks
+
+
+def combine_entries(hours, marks):
+    packed = {}
+    for key in set(hours) | set(marks):
+        amount = float(hours.get(key) or 0)
+        mark = marks.get(key) or {}
+        green = bool(mark.get("green"))
+        red = bool(mark.get("red"))
+        if amount or green or red:
+            packed[key] = {"hours": amount, "green": green, "red": red}
+    return packed
+
+
 def entries_equal(left, right):
+    left = normalise_entries(left)
+    right = normalise_entries(right)
     if set(left) != set(right):
         return False
     for key in left:
-        if hours_to_minutes(left[key]) != hours_to_minutes(right.get(key, 0)):
+        if hours_to_minutes(left[key]["hours"]) != hours_to_minutes(right[key]["hours"]):
+            return False
+        if left[key]["green"] != right[key]["green"] or left[key]["red"] != right[key]["red"]:
             return False
     return True
 
 
 def settings_equal_for_md(left, right):
-    return left.get("weekly_target_hours", DEFAULT_WEEKLY_TARGET) == right.get(
+    if left.get("weekly_target_hours", DEFAULT_WEEKLY_TARGET) != right.get(
         "weekly_target_hours", DEFAULT_WEEKLY_TARGET
-    )
+    ):
+        return False
+    if _mark_label(left, "mark_green_label", DEFAULT_MARK_GREEN_LABEL) != _mark_label(
+        right, "mark_green_label", DEFAULT_MARK_GREEN_LABEL
+    ):
+        return False
+    if _mark_label(left, "mark_red_label", DEFAULT_MARK_RED_LABEL) != _mark_label(
+        right, "mark_red_label", DEFAULT_MARK_RED_LABEL
+    ):
+        return False
+    return True
 
 
 def md_unchanged(path, entries, settings):
@@ -70,8 +134,8 @@ def md_unchanged(path, entries, settings):
 
 
 def merge_entries(local, remote):
-    merged = dict(local)
-    merged.update(remote)
+    merged = normalise_entries(local)
+    merged.update(normalise_entries(remote))
     return merged
 
 
@@ -106,7 +170,7 @@ def _parse_frontmatter(lines):
             settings[key] = int(float(value))
         elif key == "time_format":
             settings[key] = value
-        elif key == "weekly_goal":
+        elif key in ("weekly_goal", "mark_green_label", "mark_red_label"):
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
             settings[key] = value
@@ -129,7 +193,13 @@ def _parse_table_row(line):
         raw_value = int(parts[1])
     except ValueError:
         return None
-    return parts[0], raw_value
+    green = _parse_mark(parts[2]) if len(parts) > 2 else False
+    red = _parse_mark(parts[3]) if len(parts) > 3 else False
+    return parts[0], raw_value, green, red
+
+
+def _parse_mark(value):
+    return value.strip().lower() in {"1", "yes", "true", "x", "y"}
 
 
 def _resolve_time_format(settings, raw_values):
@@ -146,6 +216,8 @@ def parse_md(path):
     lines = text.splitlines()
     settings, body_lines = _parse_frontmatter(lines)
     settings.setdefault("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
+    settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
+    settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
 
     rows = []
     for line in body_lines:
@@ -153,13 +225,14 @@ def parse_md(path):
         if row is not None:
             rows.append(row)
 
-    time_format = _resolve_time_format(settings, [raw for _, raw in rows])
+    time_format = _resolve_time_format(settings, [raw for _, raw, _, _ in rows])
     settings["time_format"] = time_format
 
     entries = {}
-    for day_key, raw_value in rows:
-        if raw_value > 0:
-            entries[day_key] = raw_value_to_hours(raw_value, time_format)
+    for day_key, raw_value, green, red in rows:
+        hours = raw_value_to_hours(raw_value, time_format) if raw_value > 0 else 0
+        if hours or green or red:
+            entries[day_key] = {"hours": hours, "green": green, "red": red}
     return entries, settings
 
 
@@ -173,25 +246,33 @@ def write_md(path, entries, settings):
 
     weekly_target = settings.get("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
     weekly_goal = settings.get("weekly_goal", DEFAULT_WEEKLY_GOAL)
+    green_label = _mark_label(settings, "mark_green_label", DEFAULT_MARK_GREEN_LABEL)
+    red_label = _mark_label(settings, "mark_red_label", DEFAULT_MARK_RED_LABEL)
     last_updated = format_timestamp(now_timestamp())
+    packed = normalise_entries(entries)
 
     lines = [
         "---",
         f"weekly_target_hours: {weekly_target}",
-        f'weekly_goal: "{weekly_goal.replace(chr(34), chr(92) + chr(34))}"',
+        f"weekly_goal: {_yaml_quoted(weekly_goal)}",
+        f"mark_green_label: {_yaml_quoted(green_label)}",
+        f"mark_red_label: {_yaml_quoted(red_label)}",
         f"time_format: {TIME_FORMAT_MINUTES}",
-        f'last_updated: "{last_updated}"',
+        f"last_updated: {_yaml_quoted(last_updated)}",
         "---",
         "",
         "# Habit Tracker",
         "",
-        "| Date | Minutes |",
-        "|------|---------|",
+        "| Date | Minutes | Green | Red |",
+        "|------|---------|-------|-----|",
     ]
-    for day_key in sorted(entries):
-        minutes = hours_to_minutes(entries[day_key])
-        if minutes > 0:
-            lines.append(f"| {day_key} | {minutes} |")
+    for day_key in sorted(packed):
+        item = packed[day_key]
+        minutes = hours_to_minutes(item["hours"])
+        if minutes > 0 or item["green"] or item["red"]:
+            green = 1 if item["green"] else 0
+            red = 1 if item["red"] else 0
+            lines.append(f"| {day_key} | {minutes} | {green} | {red} |")
     lines.append("")
 
     path.write_text("\n".join(lines))

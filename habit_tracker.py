@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -31,12 +32,17 @@ from PySide6.QtWidgets import (
 )
 
 from habit_md import (
+    DEFAULT_MARK_GREEN_LABEL,
+    DEFAULT_MARK_RED_LABEL,
     DEFAULT_MD_FILENAME,
     DEFAULT_WEEKLY_GOAL,
+    combine_entries,
     display_timestamp,
     entries_equal,
     merge_entries,
+    normalise_entries,
     parse_md,
+    split_entries,
     write_md,
 )
 
@@ -61,6 +67,12 @@ ACCENT = "#89b4fa"
 EXPECTED = "#f9e2af"
 TIMER_RUNNING = "#a6e3a1"
 TIMER_STOP = "#f38ba8"
+MARK_GREEN = "#a6e3a1"
+MARK_GREEN_OFF = "#31463c"
+MARK_GREEN_OFF_HOVER = "#3d5a4c"
+MARK_RED = "#f38ba8"
+MARK_RED_OFF = "#4a3340"
+MARK_RED_OFF_HOVER = "#5c3f4e"
 
 
 def load_config():
@@ -109,6 +121,8 @@ def load_legacy_settings():
         settings = {}
     settings.setdefault("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
     settings.setdefault("weekly_goal", DEFAULT_WEEKLY_GOAL)
+    settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
+    settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
     return settings
 
 
@@ -117,8 +131,8 @@ def load_entries(config=None):
     md_path = get_md_path(config)
     if md_path and md_path.exists():
         entries, _ = parse_md(md_path)
-        return entries
-    return load_entries_json()
+        return normalise_entries(entries)
+    return normalise_entries(load_entries_json())
 
 
 def load_settings(config=None):
@@ -132,11 +146,14 @@ def load_settings(config=None):
         settings.update(load_legacy_settings())
     settings.setdefault("weekly_target_hours", DEFAULT_WEEKLY_TARGET)
     settings.setdefault("weekly_goal", DEFAULT_WEEKLY_GOAL)
+    settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
+    settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
     return settings
 
 
 def persist_data(entries, settings, config=None):
     config = config or load_config()
+    entries = normalise_entries(entries)
     save_entries_json(entries)
     md_path = get_md_path(config)
     if md_path:
@@ -150,6 +167,8 @@ def persist_data(entries, settings, config=None):
             {
                 "weekly_target_hours": settings["weekly_target_hours"],
                 "weekly_goal": settings.get("weekly_goal", DEFAULT_WEEKLY_GOAL),
+                "mark_green_label": settings.get("mark_green_label", DEFAULT_MARK_GREEN_LABEL),
+                "mark_red_label": settings.get("mark_red_label", DEFAULT_MARK_RED_LABEL),
             },
             f,
             indent=2,
@@ -158,7 +177,7 @@ def persist_data(entries, settings, config=None):
 
 
 def startup_sync(config):
-    local_entries = load_entries_json()
+    local_entries = normalise_entries(load_entries_json())
     md_path = get_md_path(config)
     last_synced = config.get("last_synced", "")
 
@@ -170,7 +189,7 @@ def startup_sync(config):
         remote_entries, remote_settings = parse_md(md_path)
         settings.update(remote_settings)
         if entries_equal(local_entries, remote_entries):
-            merged = remote_entries
+            merged = normalise_entries(remote_entries)
         else:
             merged = merge_entries(local_entries, remote_entries)
         last_synced = write_md(md_path, merged, settings)
@@ -494,24 +513,60 @@ class ResetFinancialYearDialog(QDialog):
         return self.archive_checkbox.isChecked()
 
 
-class DayButton(QPushButton):
+class DayCell(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.day_date = None
-        self.setMinimumSize(72, 56)
-        self.setFont(QFont("Sans", 10))
-        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumSize(96, 56)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+
+        self.main_btn = QPushButton()
+        self.main_btn.setFont(QFont("Sans", 10))
+        self.main_btn.setCursor(Qt.PointingHandCursor)
+        self.main_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.main_btn, stretch=1)
+
+        marks = QVBoxLayout()
+        marks.setContentsMargins(0, 0, 0, 0)
+        marks.setSpacing(3)
+        marks.addStretch()
+        self.green_btn = QPushButton()
+        self.red_btn = QPushButton()
+        for btn in (self.green_btn, self.red_btn):
+            btn.setFixedSize(20, 20)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFont(QFont("Sans", 8, QFont.Bold))
+            marks.addWidget(btn, alignment=Qt.AlignHCenter)
+        marks.addStretch()
+        layout.addLayout(marks)
+
+    def set_blank(self):
+        self.day_date = None
+        self.main_btn.setText("")
+        self.main_btn.setEnabled(False)
+        self.main_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {BG}; border: none; padding: 0px; }}"
+        )
+        for btn in (self.green_btn, self.red_btn):
+            btn.hide()
+            btn.setEnabled(False)
+            btn.setToolTip("")
 
 
 class HabitTracker(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Habit Tracker")
-        self.resize(720, 680)
-        self.setMinimumSize(600, 560)
+        self.resize(780, 680)
+        self.setMinimumSize(740, 560)
 
         self.config = load_config()
-        self.entries, self.settings, self.last_synced = startup_sync(self.config)
+        packed, self.settings, self.last_synced = startup_sync(self.config)
+        self.entries, self.marks = split_entries(packed)
         today = date.today()
         self.view_year = today.year
         self.view_month = today.month
@@ -561,6 +616,37 @@ class HabitTracker(QMainWindow):
         banner_layout.addWidget(self.weekly_goal_input)
         root.addWidget(self.goal_banner)
 
+        legend = QHBoxLayout()
+        legend.setSpacing(8)
+        green_swatch = QLabel()
+        green_swatch.setFixedSize(16, 16)
+        green_swatch.setStyleSheet(
+            f"background-color: {MARK_GREEN}; border: none; border-radius: 4px;"
+        )
+        legend.addWidget(green_swatch)
+        self.mark_green_input = QLineEdit()
+        self.mark_green_input.setPlaceholderText(DEFAULT_MARK_GREEN_LABEL)
+        self.mark_green_input.setText(
+            self.settings.get("mark_green_label") or DEFAULT_MARK_GREEN_LABEL
+        )
+        self.mark_green_input.editingFinished.connect(self._on_mark_labels_changed)
+        legend.addWidget(self.mark_green_input, stretch=1)
+        legend.addSpacing(16)
+        red_swatch = QLabel()
+        red_swatch.setFixedSize(16, 16)
+        red_swatch.setStyleSheet(
+            f"background-color: {MARK_RED}; border: none; border-radius: 4px;"
+        )
+        legend.addWidget(red_swatch)
+        self.mark_red_input = QLineEdit()
+        self.mark_red_input.setPlaceholderText(DEFAULT_MARK_RED_LABEL)
+        self.mark_red_input.setText(
+            self.settings.get("mark_red_label") or DEFAULT_MARK_RED_LABEL
+        )
+        self.mark_red_input.editingFinished.connect(self._on_mark_labels_changed)
+        legend.addWidget(self.mark_red_input, stretch=1)
+        root.addLayout(legend)
+
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs)
@@ -604,10 +690,18 @@ class HabitTracker(QMainWindow):
         for r in range(6):
             row_buttons = []
             for c in range(7):
-                btn = DayButton()
-                btn.clicked.connect(lambda checked=False, b=btn: self._on_day_click(b))
-                grid.addWidget(btn, r, c)
-                row_buttons.append(btn)
+                cell = DayCell()
+                cell.main_btn.clicked.connect(
+                    lambda checked=False, b=cell: self._on_day_click(b)
+                )
+                cell.green_btn.clicked.connect(
+                    lambda checked=False, b=cell: self._on_mark_click(b, "green")
+                )
+                cell.red_btn.clicked.connect(
+                    lambda checked=False, b=cell: self._on_mark_click(b, "red")
+                )
+                grid.addWidget(cell, r, c)
+                row_buttons.append(cell)
             self.day_buttons.append(row_buttons)
         calendar_layout.addLayout(grid)
 
@@ -841,8 +935,9 @@ class HabitTracker(QMainWindow):
         current_fy_start = financial_year_start(today)
         current_fy_label = financial_year_label(current_fy_start)
         previous_fy_start = date(current_fy_start.year - 1, FINANCIAL_YEAR_START_MONTH, FINANCIAL_YEAR_START_DAY)
-        previous_entries = entries_for_financial_year(self.entries, previous_fy_start)
-        current_entries = entries_for_financial_year(self.entries, current_fy_start)
+        stored = self._stored_entries()
+        previous_entries = entries_for_financial_year(stored, previous_fy_start)
+        current_entries = entries_for_financial_year(stored, current_fy_start)
         self.fy_status_label.setText(
             f"Current FY {current_fy_label}: {len(current_entries)} "
             f"{'entry' if len(current_entries) == 1 else 'entries'}  |  "
@@ -858,8 +953,9 @@ class HabitTracker(QMainWindow):
             current_fy_start.year - 1, FINANCIAL_YEAR_START_MONTH, FINANCIAL_YEAR_START_DAY
         )
         previous_fy_label = financial_year_label(previous_fy_start)
-        previous_entries = entries_for_financial_year(self.entries, previous_fy_start)
-        entries_to_clear = entries_before_date(self.entries, current_fy_start)
+        stored = self._stored_entries()
+        previous_entries = entries_for_financial_year(stored, previous_fy_start)
+        entries_to_clear = entries_before_date(stored, current_fy_start)
 
         if not entries_to_clear:
             QMessageBox.information(
@@ -881,17 +977,20 @@ class HabitTracker(QMainWindow):
         if self.timer_started_at is not None:
             self._stop_timer()
 
+        stored = self._stored_entries()
+        entries_to_clear = entries_before_date(stored, current_fy_start)
         archive_paths = None
         if dialog.archive_previous_year():
             archive_paths = archive_financial_year(
-                self.entries, self.settings, previous_fy_start
+                stored, self.settings, previous_fy_start
             )
 
-        self.entries = {
-            key: hours
-            for key, hours in self.entries.items()
+        kept = {
+            key: value
+            for key, value in stored.items()
             if date.fromisoformat(key) >= current_fy_start
         }
+        self.entries, self.marks = split_entries(kept)
         self._persist_data()
         self._refresh_calendar()
         self._refresh_plot()
@@ -1008,15 +1107,15 @@ class HabitTracker(QMainWindow):
         self._refresh_calendar()
         self._refresh_plot()
 
-    def _on_day_click(self, btn):
-        if btn.day_date is None:
+    def _on_day_click(self, cell):
+        if cell.day_date is None:
             return
 
-        self.selected_date = btn.day_date
-        key = date_key(btn.day_date)
+        self.selected_date = cell.day_date
+        key = date_key(cell.day_date)
         current = self.entries.get(key)
 
-        dialog = HoursDialog(btn.day_date, current, self)
+        dialog = HoursDialog(cell.day_date, current, self)
         if dialog.exec() != QDialog.Accepted:
             self._refresh_calendar()
             return
@@ -1034,6 +1133,25 @@ class HabitTracker(QMainWindow):
         self._refresh_plot()
         self._refresh_stats()
 
+    def _on_mark_click(self, cell, which):
+        if cell.day_date is None:
+            return
+
+        self.selected_date = cell.day_date
+        key = date_key(cell.day_date)
+        current = self.marks.get(key, {})
+        mark = {
+            "green": bool(current.get("green")),
+            "red": bool(current.get("red")),
+        }
+        mark[which] = not mark[which]
+        if mark["green"] or mark["red"]:
+            self.marks[key] = mark
+        else:
+            self.marks.pop(key, None)
+        self._persist_data()
+        self._refresh_calendar()
+
     def _on_tab_changed(self, index):
         if self.tabs.tabText(index) == "Stats":
             self._refresh_stats()
@@ -1049,11 +1167,31 @@ class HabitTracker(QMainWindow):
         self.settings["weekly_goal"] = self.weekly_goal_input.text().strip()
         self._persist_data()
 
+    def _on_mark_labels_changed(self):
+        green = self.mark_green_input.text().strip() or DEFAULT_MARK_GREEN_LABEL
+        red = self.mark_red_input.text().strip() or DEFAULT_MARK_RED_LABEL
+        if self.mark_green_input.text() != green:
+            self.mark_green_input.setText(green)
+        if self.mark_red_input.text() != red:
+            self.mark_red_input.setText(red)
+        if (
+            self.settings.get("mark_green_label") == green
+            and self.settings.get("mark_red_label") == red
+        ):
+            return
+        self.settings["mark_green_label"] = green
+        self.settings["mark_red_label"] = red
+        self._persist_data()
+        self._refresh_calendar()
+
     def _md_path(self):
         return get_md_path(self.config)
 
+    def _stored_entries(self):
+        return combine_entries(self.entries, self.marks)
+
     def _persist_data(self):
-        self.last_synced = persist_data(self.entries, self.settings, self.config)
+        self.last_synced = persist_data(self._stored_entries(), self.settings, self.config)
         self._update_sync_status()
 
     def _update_sync_status(self):
@@ -1092,9 +1230,16 @@ class HabitTracker(QMainWindow):
         self.vault_path_input.setText(path)
         self.config["vault_path"] = path
         save_config(self.config)
-        self.entries, self.settings, self.last_synced = startup_sync(self.config)
+        packed, self.settings, self.last_synced = startup_sync(self.config)
+        self.entries, self.marks = split_entries(packed)
         self.weekly_target_spin.setValue(self.settings["weekly_target_hours"])
         self.weekly_goal_input.setText(self.settings.get("weekly_goal", DEFAULT_WEEKLY_GOAL))
+        self.mark_green_input.setText(
+            self.settings.get("mark_green_label") or DEFAULT_MARK_GREEN_LABEL
+        )
+        self.mark_red_input.setText(
+            self.settings.get("mark_red_label") or DEFAULT_MARK_RED_LABEL
+        )
         self._refresh_calendar()
         self._refresh_plot()
         self._refresh_stats()
@@ -1116,17 +1261,28 @@ class HabitTracker(QMainWindow):
             source = Path(source)
 
         remote_entries, remote_settings = parse_md(source)
-        if entries_equal(self.entries, remote_entries):
-            merged = remote_entries
+        local_entries = self._stored_entries()
+        if entries_equal(local_entries, remote_entries):
+            merged = normalise_entries(remote_entries)
         else:
-            merged = merge_entries(self.entries, remote_entries)
-        self.entries = merged
+            merged = merge_entries(local_entries, remote_entries)
+        self.entries, self.marks = split_entries(merged)
         if remote_settings.get("weekly_target_hours"):
             self.settings["weekly_target_hours"] = remote_settings["weekly_target_hours"]
             self.weekly_target_spin.setValue(self.settings["weekly_target_hours"])
         if "weekly_goal" in remote_settings:
             self.settings["weekly_goal"] = remote_settings["weekly_goal"]
             self.weekly_goal_input.setText(self.settings["weekly_goal"])
+        if "mark_green_label" in remote_settings:
+            self.settings["mark_green_label"] = (
+                remote_settings["mark_green_label"] or DEFAULT_MARK_GREEN_LABEL
+            )
+            self.mark_green_input.setText(self.settings["mark_green_label"])
+        if "mark_red_label" in remote_settings:
+            self.settings["mark_red_label"] = (
+                remote_settings["mark_red_label"] or DEFAULT_MARK_RED_LABEL
+            )
+            self.mark_red_input.setText(self.settings["mark_red_label"])
         self._persist_data()
         self._refresh_calendar()
         self._refresh_plot()
@@ -1146,8 +1302,9 @@ class HabitTracker(QMainWindow):
             if not target:
                 return
             target = Path(target)
-        self.last_synced = write_md(target, self.entries, self.settings)
-        save_entries_json(self.entries)
+        packed = self._stored_entries()
+        self.last_synced = write_md(target, packed, self.settings)
+        save_entries_json(packed)
         if md_path:
             self.config["last_synced"] = self.last_synced
             save_config(self.config)
@@ -1161,13 +1318,42 @@ class HabitTracker(QMainWindow):
     def _weekly_target(self):
         return self.settings["weekly_target_hours"]
 
-    def _style_day_button(self, btn, day_date, day_num, hours, today):
-        btn.day_date = day_date
-        btn.setText(str(day_num))
+    def _style_mark_button(self, btn, checked, on_colour, off_colour, hover_colour, tip):
+        btn.show()
         btn.setEnabled(True)
+        btn.setToolTip(tip)
+        if checked:
+            btn.setText("✓")
+            bg = on_colour
+            fg = BG
+            hover = on_colour
+        else:
+            btn.setText("")
+            bg = off_colour
+            fg = TEXT
+            hover = hover_colour
+        btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {bg};
+                color: {fg};
+                border: none;
+                border-radius: 4px;
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover};
+            }}
+            """
+        )
+
+    def _style_day_button(self, cell, day_date, day_num, hours, today):
+        cell.day_date = day_date
+        cell.main_btn.setText(str(day_num))
+        cell.main_btn.setEnabled(True)
 
         if hours is not None:
-            btn.setText(f"{day_num}\n● {format_duration(hours)}")
+            cell.main_btn.setText(f"{day_num}\n● {format_duration(hours)}")
 
         bg = SURFACE
         fg = TEXT
@@ -1176,7 +1362,7 @@ class HabitTracker(QMainWindow):
         if day_date == self.selected_date:
             bg = SURFACE_ACTIVE
 
-        btn.setStyleSheet(
+        cell.main_btn.setStyleSheet(
             f"""
             QPushButton {{
                 background-color: {bg};
@@ -1190,6 +1376,23 @@ class HabitTracker(QMainWindow):
             }}
             """
         )
+        mark = self.marks.get(date_key(day_date), {})
+        self._style_mark_button(
+            cell.green_btn,
+            bool(mark.get("green")),
+            MARK_GREEN,
+            MARK_GREEN_OFF,
+            MARK_GREEN_OFF_HOVER,
+            self.settings.get("mark_green_label") or DEFAULT_MARK_GREEN_LABEL,
+        )
+        self._style_mark_button(
+            cell.red_btn,
+            bool(mark.get("red")),
+            MARK_RED,
+            MARK_RED_OFF,
+            MARK_RED_OFF_HOVER,
+            self.settings.get("mark_red_label") or DEFAULT_MARK_RED_LABEL,
+        )
 
     def _refresh_calendar(self):
         self.month_label.setText(
@@ -1202,13 +1405,7 @@ class HabitTracker(QMainWindow):
 
         for r in range(6):
             for c in range(7):
-                btn = self.day_buttons[r][c]
-                btn.day_date = None
-                btn.setText("")
-                btn.setEnabled(False)
-                btn.setStyleSheet(
-                    f"QPushButton {{ background-color: {BG}; border: none; }}"
-                )
+                self.day_buttons[r][c].set_blank()
 
         for r, week in enumerate(weeks):
             for c, day_num in enumerate(week):
@@ -1223,14 +1420,19 @@ class HabitTracker(QMainWindow):
 
         key = date_key(self.selected_date)
         hours = self.entries.get(key)
+        mark = self.marks.get(key, {})
+        parts = []
         if hours is not None:
-            self.status_label.setText(
-                f"Selected: {self.selected_date.strftime('%d %b %Y')} — {format_duration(hours)}"
-            )
+            parts.append(format_duration(hours))
+        if mark.get("green"):
+            parts.append(self.settings.get("mark_green_label") or DEFAULT_MARK_GREEN_LABEL)
+        if mark.get("red"):
+            parts.append(self.settings.get("mark_red_label") or DEFAULT_MARK_RED_LABEL)
+        when = self.selected_date.strftime("%d %b %Y")
+        if parts:
+            self.status_label.setText(f"Selected: {when} — {', '.join(parts)}")
         else:
-            self.status_label.setText(
-                f"Selected: {self.selected_date.strftime('%d %b %Y')} — no entry"
-            )
+            self.status_label.setText(f"Selected: {when} — no entry")
 
     def _plot_entries(self):
         today = date.today()
