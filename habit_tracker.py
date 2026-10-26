@@ -39,6 +39,9 @@ from habit_md import (
     DEFAULT_MARK_RED_LABEL,
     DEFAULT_MD_FILENAME,
     DEFAULT_WEEKLY_GOAL,
+    GOAL_SECTION_PERSONAL,
+    GOAL_SECTION_PROFESSIONAL,
+    GOAL_SECTIONS,
     clamp_craving,
     combine_entries,
     display_timestamp,
@@ -731,8 +734,9 @@ class GoalRow(QWidget):
     changed = Signal()
     removed = Signal(object)
 
-    def __init__(self, title="", progress=0, parent=None):
+    def __init__(self, title="", progress=0, section=GOAL_SECTION_PROFESSIONAL, parent=None):
         super().__init__(parent)
+        self.section = section
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -954,11 +958,6 @@ class HabitTracker(QMainWindow):
         goals_meta.addWidget(self.copy_unfinished_btn)
         goals_layout.addLayout(goals_meta)
 
-        self.goals_empty_label = QLabel("No goals for this week yet")
-        self.goals_empty_label.setAlignment(Qt.AlignCenter)
-        self.goals_empty_label.setStyleSheet(f"color: {TEXT_DIM};")
-        goals_layout.addWidget(self.goals_empty_label)
-
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -968,16 +967,47 @@ class HabitTracker(QMainWindow):
         self.goals_list = QVBoxLayout(list_host)
         self.goals_list.setContentsMargins(0, 0, 0, 0)
         self.goals_list.setSpacing(8)
+
+        professional_heading = QLabel("Professional")
+        professional_heading.setFont(QFont("Sans", 13, QFont.Bold))
+        self.goals_list.addWidget(professional_heading)
+        self.professional_empty = QLabel("No professional goals this week yet")
+        self.professional_empty.setStyleSheet(f"color: {TEXT_DIM};")
+        self.goals_list.addWidget(self.professional_empty)
+        self.professional_list = QVBoxLayout()
+        self.professional_list.setContentsMargins(0, 0, 0, 0)
+        self.professional_list.setSpacing(8)
+        self.goals_list.addLayout(self.professional_list)
+        add_professional = QPushButton("Add professional goal")
+        add_professional.clicked.connect(
+            lambda: self._add_goal(GOAL_SECTION_PROFESSIONAL)
+        )
+        self.goals_list.addWidget(add_professional, alignment=Qt.AlignLeft)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.HLine)
+        divider.setFrameShadow(QFrame.Plain)
+        divider.setStyleSheet(f"color: {SURFACE_ALT}; background-color: {SURFACE_ALT};")
+        divider.setFixedHeight(1)
+        self.goals_list.addWidget(divider)
+
+        personal_heading = QLabel("Personal")
+        personal_heading.setFont(QFont("Sans", 13, QFont.Bold))
+        self.goals_list.addWidget(personal_heading)
+        self.personal_empty = QLabel("No personal goals this week yet")
+        self.personal_empty.setStyleSheet(f"color: {TEXT_DIM};")
+        self.goals_list.addWidget(self.personal_empty)
+        self.personal_list = QVBoxLayout()
+        self.personal_list.setContentsMargins(0, 0, 0, 0)
+        self.personal_list.setSpacing(8)
+        self.goals_list.addLayout(self.personal_list)
+        add_personal = QPushButton("Add personal goal")
+        add_personal.clicked.connect(lambda: self._add_goal(GOAL_SECTION_PERSONAL))
+        self.goals_list.addWidget(add_personal, alignment=Qt.AlignLeft)
+
         self.goals_list.addStretch()
         scroll.setWidget(list_host)
         goals_layout.addWidget(scroll, stretch=1)
-
-        add_row = QHBoxLayout()
-        add_goal_btn = QPushButton("Add goal")
-        add_goal_btn.clicked.connect(self._add_goal)
-        add_row.addWidget(add_goal_btn)
-        add_row.addStretch()
-        goals_layout.addLayout(add_row)
 
         self.tabs.addTab(goals_tab, "Goals")
 
@@ -1577,19 +1607,24 @@ class HabitTracker(QMainWindow):
     def _goals_week_key(self):
         return iso_week_key(self.goals_week_monday)
 
+    def _section_list(self, section):
+        if section == GOAL_SECTION_PERSONAL:
+            return self.personal_list
+        return self.professional_list
+
     def _clear_goal_rows(self):
-        while self.goals_list.count() > 1:
-            item = self.goals_list.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        for row in self.goal_rows:
+            row.setParent(None)
+            row.deleteLater()
         self.goal_rows = []
 
-    def _insert_goal_row(self, title, progress, focus=False):
-        row = GoalRow(title, progress)
+    def _insert_goal_row(self, title, progress, section, focus=False):
+        if section not in GOAL_SECTIONS:
+            section = GOAL_SECTION_PROFESSIONAL
+        row = GoalRow(title, progress, section)
         row.changed.connect(self._on_goal_row_changed)
         row.removed.connect(self._on_goal_row_removed)
-        self.goals_list.insertWidget(self.goals_list.count() - 1, row)
+        self._section_list(section).addWidget(row)
         self.goal_rows.append(row)
         if focus:
             row.title_input.setFocus()
@@ -1607,15 +1642,23 @@ class HabitTracker(QMainWindow):
             )
         else:
             self.goals_summary_label.setText("0 of 0 complete")
-        self.goals_empty_label.setVisible(len(self.goal_rows) == 0)
-        current_titles = {row.title() for row in titled}
+        professional = [
+            row for row in self.goal_rows if row.section == GOAL_SECTION_PROFESSIONAL
+        ]
+        personal = [
+            row for row in self.goal_rows if row.section == GOAL_SECTION_PERSONAL
+        ]
+        self.professional_empty.setVisible(len(professional) == 0)
+        self.personal_empty.setVisible(len(personal) == 0)
+        current_keys = {(row.title(), row.section) for row in titled}
         prev_key = previous_iso_week_key(self._goals_week_key())
         unfinished = [
             item
             for item in normalise_weekly_goals(self.settings.get("weekly_goals")).get(
                 prev_key, []
             )
-            if item["progress"] < 100 and item["title"] not in current_titles
+            if item["progress"] < 100
+            and (item["title"], item["section"]) not in current_keys
         ]
         self.copy_unfinished_btn.setEnabled(bool(unfinished))
 
@@ -1628,12 +1671,16 @@ class HabitTracker(QMainWindow):
         items = normalise_weekly_goals(self.settings.get("weekly_goals")).get(key, [])
         self._clear_goal_rows()
         for item in items:
-            self._insert_goal_row(item["title"], item["progress"])
+            self._insert_goal_row(item["title"], item["progress"], item["section"])
         self._update_goals_summary()
 
     def _collect_goal_rows(self):
         return [
-            {"title": row.title(), "progress": row.progress()}
+            {
+                "title": row.title(),
+                "progress": row.progress(),
+                "section": row.section,
+            }
             for row in self.goal_rows
             if row.title()
         ]
@@ -1650,8 +1697,8 @@ class HabitTracker(QMainWindow):
         self._persist_data()
         self._update_goals_summary()
 
-    def _add_goal(self):
-        self._insert_goal_row("", 0, focus=True)
+    def _add_goal(self, section=GOAL_SECTION_PROFESSIONAL):
+        self._insert_goal_row("", 0, section, focus=True)
         self._update_goals_summary()
 
     def _on_goal_row_changed(self):
@@ -1660,7 +1707,7 @@ class HabitTracker(QMainWindow):
     def _on_goal_row_removed(self, row):
         if row in self.goal_rows:
             self.goal_rows.remove(row)
-        self.goals_list.removeWidget(row)
+        self._section_list(row.section).removeWidget(row)
         row.deleteLater()
         self._save_goal_rows()
 
@@ -1687,12 +1734,19 @@ class HabitTracker(QMainWindow):
         if not unfinished:
             return
         current = list(goals.get(key, []))
-        titles = {item["title"] for item in current}
+        keys = {(item["title"], item["section"]) for item in current}
         changed = False
         for item in unfinished:
-            if item["title"] not in titles:
-                current.append({"title": item["title"], "progress": 0})
-                titles.add(item["title"])
+            pair = (item["title"], item["section"])
+            if pair not in keys:
+                current.append(
+                    {
+                        "title": item["title"],
+                        "progress": 0,
+                        "section": item["section"],
+                    }
+                )
+                keys.add(pair)
                 changed = True
         if not changed:
             return

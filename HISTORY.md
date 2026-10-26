@@ -2,6 +2,8 @@
 
 ## 2026-10-26
 
+Split weekly goals into Professional and Personal sections with a divider. Existing goals without a section stay under Professional. Copying last week's unfinished items keeps each goal in its section.
+
 Added a 0–10 craving box above each Habit tick, in the same colour. The box shows a whole number from 0 to 10. Click raises the level, right-click lowers it. Cravings are stored with that day's marks in the local JSON file and the Obsidian table.
 
 Moved the green, red, and gold tick marks off the calendar and into a Habit tab. The calendar is date and hours only. Habit has its own month grid, the editable colour legend, and a monthly count for each mark.

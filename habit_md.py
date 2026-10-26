@@ -12,6 +12,14 @@ TIME_FORMAT_MINUTES = "minutes"
 TIME_FORMAT_CENTI_HOURS = "centi_hours"
 WEEK_KEY_RE = re.compile(r"^(\d{4})-W(\d{2})$")
 WEEK_HEADING_RE = re.compile(r"^###\s+(\d{4}-W\d{2})\b")
+GOAL_SECTION_PROFESSIONAL = "professional"
+GOAL_SECTION_PERSONAL = "personal"
+GOAL_SECTIONS = (GOAL_SECTION_PROFESSIONAL, GOAL_SECTION_PERSONAL)
+GOAL_SECTION_LABELS = {
+    GOAL_SECTION_PROFESSIONAL: "Professional",
+    GOAL_SECTION_PERSONAL: "Personal",
+}
+SECTION_HEADING_RE = re.compile(r"^#{2,4}\s+(professional|personal)\s*$", re.I)
 
 
 def hours_to_minutes(hours):
@@ -114,7 +122,16 @@ def normalise_weekly_goals(goals):
                 progress = int(round(float(item.get("progress") or 0)))
             except (TypeError, ValueError):
                 progress = 0
-            cleaned.append({"title": title, "progress": max(0, min(100, progress))})
+            section = str(item.get("section") or GOAL_SECTION_PROFESSIONAL).strip().lower()
+            if section not in GOAL_SECTIONS:
+                section = GOAL_SECTION_PROFESSIONAL
+            cleaned.append(
+                {
+                    "title": title,
+                    "progress": max(0, min(100, progress)),
+                    "section": section,
+                }
+            )
         if cleaned:
             result[key] = cleaned
     return result
@@ -352,18 +369,26 @@ def parse_weekly_goals(body_lines):
     _, goals_lines = _split_hours_and_goals(body_lines)
     goals = {}
     current = None
+    section = GOAL_SECTION_PROFESSIONAL
     for line in goals_lines:
         heading = WEEK_HEADING_RE.match(line.strip())
         if heading:
             current = heading.group(1)
+            section = GOAL_SECTION_PROFESSIONAL
             goals.setdefault(current, [])
+            continue
+        section_heading = SECTION_HEADING_RE.match(line.strip())
+        if section_heading:
+            section = section_heading.group(1).lower()
             continue
         if current is None:
             continue
         row = _parse_goal_row(line)
         if row is not None:
             title, progress = row
-            goals[current].append({"title": title, "progress": progress})
+            goals[current].append(
+                {"title": title, "progress": progress, "section": section}
+            )
     return normalise_weekly_goals(goals)
 
 
@@ -519,11 +544,18 @@ def write_md(path, entries, settings):
         for week_key in sorted(weekly_goals):
             lines.append(f"### {week_key} ({iso_week_range_label(week_key)})")
             lines.append("")
-            lines.append("| Goal | Progress |")
-            lines.append("|------|----------|")
-            for item in weekly_goals[week_key]:
-                lines.append(f"| {item['title']} | {item['progress']} |")
-            lines.append("")
+            items = weekly_goals[week_key]
+            for section in GOAL_SECTIONS:
+                section_items = [item for item in items if item["section"] == section]
+                if not section_items:
+                    continue
+                lines.append(f"#### {GOAL_SECTION_LABELS[section]}")
+                lines.append("")
+                lines.append("| Goal | Progress |")
+                lines.append("|------|----------|")
+                for item in section_items:
+                    lines.append(f"| {item['title']} | {item['progress']} |")
+                lines.append("")
 
     path.write_text("\n".join(lines))
     return last_updated
