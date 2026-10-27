@@ -7,6 +7,7 @@ DEFAULT_WEEKLY_GOAL = "Standards over everything"
 DEFAULT_MARK_GREEN_LABEL = "Green"
 DEFAULT_MARK_RED_LABEL = "Red"
 DEFAULT_MARK_GOLD_LABEL = "Gold"
+DEFAULT_MARK_BLUE_LABEL = "Blue"
 DEFAULT_MD_FILENAME = "Habit Tracker.md"
 TIME_FORMAT_MINUTES = "minutes"
 TIME_FORMAT_CENTI_HOURS = "centi_hours"
@@ -175,12 +176,29 @@ def clamp_craving(value):
         return 0
 
 
+BLUE_LEVELS = ("N", "L", "M", "H")
+
+
+def normalise_blue(value):
+    if isinstance(value, bool):
+        return "H" if value else "N"
+    if isinstance(value, (int, float)):
+        return "H" if int(value) == 1 else "N"
+    text = str(value or "").strip().upper()
+    if text in BLUE_LEVELS:
+        return text
+    if text in {"1", "YES", "TRUE", "X", "Y"}:
+        return "H"
+    return "N"
+
+
 def mark_fields(value=None):
     value = value or {}
     return {
         "green": bool(value.get("green")),
         "red": bool(value.get("red")),
         "gold": bool(value.get("gold")),
+        "blue": normalise_blue(value.get("blue")),
         "green_craving": clamp_craving(value.get("green_craving")),
         "red_craving": clamp_craving(value.get("red_craving")),
         "gold_craving": clamp_craving(value.get("gold_craving")),
@@ -192,6 +210,7 @@ def has_mark_data(item):
         item.get("green")
         or item.get("red")
         or item.get("gold")
+        or normalise_blue(item.get("blue")) != "N"
         or item.get("green_craving")
         or item.get("red_craving")
         or item.get("gold_craving")
@@ -245,6 +264,7 @@ def entries_equal(left, right):
             left[key]["green"] != right[key]["green"]
             or left[key]["red"] != right[key]["red"]
             or left[key]["gold"] != right[key]["gold"]
+            or left[key]["blue"] != right[key]["blue"]
             or left[key]["green_craving"] != right[key]["green_craving"]
             or left[key]["red_craving"] != right[key]["red_craving"]
             or left[key]["gold_craving"] != right[key]["gold_craving"]
@@ -268,6 +288,10 @@ def settings_equal_for_md(left, right):
         return False
     if _mark_label(left, "mark_gold_label", DEFAULT_MARK_GOLD_LABEL) != _mark_label(
         right, "mark_gold_label", DEFAULT_MARK_GOLD_LABEL
+    ):
+        return False
+    if _mark_label(left, "mark_blue_label", DEFAULT_MARK_BLUE_LABEL) != _mark_label(
+        right, "mark_blue_label", DEFAULT_MARK_BLUE_LABEL
     ):
         return False
     return normalise_weekly_goals(left.get("weekly_goals")) == normalise_weekly_goals(
@@ -322,7 +346,13 @@ def _parse_frontmatter(lines):
             settings[key] = int(float(value))
         elif key == "time_format":
             settings[key] = value
-        elif key in ("weekly_goal", "mark_green_label", "mark_red_label", "mark_gold_label"):
+        elif key in (
+            "weekly_goal",
+            "mark_green_label",
+            "mark_red_label",
+            "mark_gold_label",
+            "mark_blue_label",
+        ):
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
             settings[key] = value
@@ -412,6 +442,7 @@ def _parse_table_row(line):
     green_craving = _parse_craving(parts[5]) if len(parts) > 5 else 0
     red_craving = _parse_craving(parts[6]) if len(parts) > 6 else 0
     gold_craving = _parse_craving(parts[7]) if len(parts) > 7 else 0
+    blue = normalise_blue(parts[8]) if len(parts) > 8 else "N"
     return (
         parts[0],
         raw_value,
@@ -421,6 +452,7 @@ def _parse_table_row(line):
         green_craving,
         red_craving,
         gold_craving,
+        blue,
     )
 
 
@@ -452,6 +484,7 @@ def parse_md(path):
     settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
     settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
     settings.setdefault("mark_gold_label", DEFAULT_MARK_GOLD_LABEL)
+    settings.setdefault("mark_blue_label", DEFAULT_MARK_BLUE_LABEL)
     settings["weekly_goals"] = parse_weekly_goals(body_lines)
 
     hours_lines, _ = _split_hours_and_goals(body_lines)
@@ -461,9 +494,7 @@ def parse_md(path):
         if row is not None:
             rows.append(row)
 
-    time_format = _resolve_time_format(
-        settings, [raw for _, raw, _, _, _, _, _, _ in rows]
-    )
+    time_format = _resolve_time_format(settings, [row[1] for row in rows])
     settings["time_format"] = time_format
 
     entries = {}
@@ -476,6 +507,7 @@ def parse_md(path):
         green_craving,
         red_craving,
         gold_craving,
+        blue,
     ) in rows:
         hours = raw_value_to_hours(raw_value, time_format) if raw_value > 0 else 0
         item = {
@@ -483,6 +515,7 @@ def parse_md(path):
             "green": green,
             "red": red,
             "gold": gold,
+            "blue": blue,
             "green_craving": green_craving,
             "red_craving": red_craving,
             "gold_craving": gold_craving,
@@ -505,6 +538,7 @@ def write_md(path, entries, settings):
     green_label = _mark_label(settings, "mark_green_label", DEFAULT_MARK_GREEN_LABEL)
     red_label = _mark_label(settings, "mark_red_label", DEFAULT_MARK_RED_LABEL)
     gold_label = _mark_label(settings, "mark_gold_label", DEFAULT_MARK_GOLD_LABEL)
+    blue_label = _mark_label(settings, "mark_blue_label", DEFAULT_MARK_BLUE_LABEL)
     last_updated = format_timestamp(now_timestamp())
     packed = normalise_entries(entries)
     weekly_goals = normalise_weekly_goals(settings.get("weekly_goals"))
@@ -516,14 +550,15 @@ def write_md(path, entries, settings):
         f"mark_green_label: {_yaml_quoted(green_label)}",
         f"mark_red_label: {_yaml_quoted(red_label)}",
         f"mark_gold_label: {_yaml_quoted(gold_label)}",
+        f"mark_blue_label: {_yaml_quoted(blue_label)}",
         f"time_format: {TIME_FORMAT_MINUTES}",
         f"last_updated: {_yaml_quoted(last_updated)}",
         "---",
         "",
         "# Habit Tracker",
         "",
-        "| Date | Minutes | Green | Red | Gold | Green craving | Red craving | Gold craving |",
-        "|------|---------|-------|-----|------|---------------|-------------|--------------|",
+        "| Date | Minutes | Green | Red | Gold | Green craving | Red craving | Gold craving | Blue |",
+        "|------|---------|-------|-----|------|---------------|-------------|--------------|------|",
     ]
     for day_key in sorted(packed):
         item = packed[day_key]
@@ -534,7 +569,8 @@ def write_md(path, entries, settings):
             gold = 1 if item["gold"] else 0
             lines.append(
                 f"| {day_key} | {minutes} | {green} | {red} | {gold} | "
-                f"{item['green_craving']} | {item['red_craving']} | {item['gold_craving']} |"
+                f"{item['green_craving']} | {item['red_craving']} | {item['gold_craving']} | "
+                f"{item['blue']} |"
             )
     lines.append("")
 

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from habit_md import (
+    DEFAULT_MARK_BLUE_LABEL,
     DEFAULT_MARK_GOLD_LABEL,
     DEFAULT_MARK_GREEN_LABEL,
     DEFAULT_MARK_RED_LABEL,
@@ -53,10 +54,12 @@ from habit_md import (
     merge_entries,
     merge_weekly_goals,
     monday_of,
+    normalise_blue,
     normalise_entries,
     normalise_weekly_goals,
     parse_md,
     previous_iso_week_key,
+    BLUE_LEVELS,
     split_entries,
     weekly_goals_before_date,
     weekly_goals_for_financial_year,
@@ -94,6 +97,14 @@ MARK_RED_OFF_HOVER = "#5c3f4e"
 MARK_GOLD = "#f9e2af"
 MARK_GOLD_OFF = "#4a4335"
 MARK_GOLD_OFF_HOVER = "#5c5442"
+MARK_BLUE = "#89b4fa"
+MARK_BLUE_MED = "#5b7ab5"
+MARK_BLUE_MED_HOVER = "#6d8bc4"
+MARK_BLUE_LOW = "#3d5278"
+MARK_BLUE_LOW_HOVER = "#4a628f"
+MARK_BLUE_OFF = "#2e3a4f"
+MARK_BLUE_OFF_HOVER = "#3a4a66"
+BLUE_LEVEL_WORDS = {"N": "None", "L": "Low", "M": "Medium", "H": "High"}
 
 
 def load_config():
@@ -145,6 +156,7 @@ def load_legacy_settings():
     settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
     settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
     settings.setdefault("mark_gold_label", DEFAULT_MARK_GOLD_LABEL)
+    settings.setdefault("mark_blue_label", DEFAULT_MARK_BLUE_LABEL)
     settings["weekly_goals"] = normalise_weekly_goals(settings.get("weekly_goals"))
     return settings
 
@@ -172,6 +184,7 @@ def load_settings(config=None):
     settings.setdefault("mark_green_label", DEFAULT_MARK_GREEN_LABEL)
     settings.setdefault("mark_red_label", DEFAULT_MARK_RED_LABEL)
     settings.setdefault("mark_gold_label", DEFAULT_MARK_GOLD_LABEL)
+    settings.setdefault("mark_blue_label", DEFAULT_MARK_BLUE_LABEL)
     settings["weekly_goals"] = normalise_weekly_goals(settings.get("weekly_goals"))
     return settings
 
@@ -195,6 +208,7 @@ def persist_data(entries, settings, config=None):
                 "mark_green_label": settings.get("mark_green_label", DEFAULT_MARK_GREEN_LABEL),
                 "mark_red_label": settings.get("mark_red_label", DEFAULT_MARK_RED_LABEL),
                 "mark_gold_label": settings.get("mark_gold_label", DEFAULT_MARK_GOLD_LABEL),
+                "mark_blue_label": settings.get("mark_blue_label", DEFAULT_MARK_BLUE_LABEL),
                 "weekly_goals": normalise_weekly_goals(settings.get("weekly_goals")),
             },
             f,
@@ -574,6 +588,42 @@ class CravingBox(QSpinBox):
         super().mousePressEvent(event)
 
 
+class BlueLevelButton(QPushButton):
+    levelChanged = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._level = "N"
+        self.setText("N")
+        self.setContextMenuPolicy(Qt.NoContextMenu)
+
+    def level(self):
+        return self._level
+
+    def setLevel(self, level):
+        level = normalise_blue(level)
+        self.setText(level)
+        if level == self._level:
+            return
+        self._level = level
+        self.levelChanged.emit(level)
+
+    def _step(self, delta):
+        index = BLUE_LEVELS.index(self._level)
+        self.setLevel(BLUE_LEVELS[(index + delta) % len(BLUE_LEVELS)])
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._step(1)
+            event.accept()
+            return
+        if event.button() == Qt.RightButton:
+            self._step(-1)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class DayButton(QPushButton):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -595,7 +645,7 @@ class HabitDayCell(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.day_date = None
-        self.setMinimumSize(88, 102)
+        self.setMinimumSize(112, 102)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAttribute(Qt.WA_StyledBackground, True)
 
@@ -617,6 +667,11 @@ class HabitDayCell(QWidget):
         self.gold_craving = CravingBox()
         for box in (self.green_craving, self.red_craving, self.gold_craving):
             cravings.addWidget(box, stretch=1)
+        self.craving_spacer = QWidget()
+        self.craving_spacer.setMinimumWidth(22)
+        self.craving_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.craving_spacer.setStyleSheet("background-color: transparent; border: none;")
+        cravings.addWidget(self.craving_spacer, stretch=1)
         layout.addLayout(cravings)
 
         ticks = QHBoxLayout()
@@ -625,7 +680,8 @@ class HabitDayCell(QWidget):
         self.green_btn = QPushButton()
         self.red_btn = QPushButton()
         self.gold_btn = QPushButton()
-        for btn in (self.green_btn, self.red_btn, self.gold_btn):
+        self.blue_btn = BlueLevelButton()
+        for btn in (self.green_btn, self.red_btn, self.gold_btn, self.blue_btn):
             btn.setMinimumSize(22, 22)
             btn.setMaximumHeight(28)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -646,7 +702,8 @@ class HabitDayCell(QWidget):
             box.hide()
             box.setEnabled(False)
             box.setToolTip("")
-        for btn in (self.green_btn, self.red_btn, self.gold_btn):
+        self.craving_spacer.hide()
+        for btn in (self.green_btn, self.red_btn, self.gold_btn, self.blue_btn):
             btn.hide()
             btn.setEnabled(False)
             btn.setToolTip("")
@@ -767,8 +824,8 @@ class HabitTracker(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Habit Tracker")
-        self.resize(780, 700)
-        self.setMinimumSize(720, 600)
+        self.resize(900, 700)
+        self.setMinimumSize(860, 600)
 
         self.config = load_config()
         packed, self.settings, self.last_synced = startup_sync(self.config)
@@ -1148,6 +1205,20 @@ class HabitTracker(QMainWindow):
         )
         self.mark_gold_input.editingFinished.connect(self._on_mark_labels_changed)
         legend.addWidget(self.mark_gold_input, stretch=1)
+        legend.addSpacing(12)
+        blue_swatch = QLabel()
+        blue_swatch.setFixedSize(16, 16)
+        blue_swatch.setStyleSheet(
+            f"background-color: {MARK_BLUE}; border: none; border-radius: 4px;"
+        )
+        legend.addWidget(blue_swatch)
+        self.mark_blue_input = QLineEdit()
+        self.mark_blue_input.setPlaceholderText(DEFAULT_MARK_BLUE_LABEL)
+        self.mark_blue_input.setText(
+            self.settings.get("mark_blue_label") or DEFAULT_MARK_BLUE_LABEL
+        )
+        self.mark_blue_input.editingFinished.connect(self._on_mark_labels_changed)
+        legend.addWidget(self.mark_blue_input, stretch=1)
         habit_layout.addLayout(legend)
 
         habit_header = QHBoxLayout()
@@ -1197,6 +1268,9 @@ class HabitTracker(QMainWindow):
                 )
                 cell.gold_btn.clicked.connect(
                     lambda checked=False, b=cell: self._on_mark_click(b, "gold")
+                )
+                cell.blue_btn.levelChanged.connect(
+                    lambda level, b=cell: self._on_blue_changed(b, level)
                 )
                 cell.green_craving.valueChanged.connect(
                     lambda value, b=cell: self._on_craving_changed(b, "green_craving", value)
@@ -1551,6 +1625,20 @@ class HabitTracker(QMainWindow):
         self._persist_data()
         self._refresh_habit()
 
+    def _on_blue_changed(self, cell, level):
+        if cell.day_date is None:
+            return
+        self.selected_date = cell.day_date
+        key = date_key(cell.day_date)
+        mark = mark_fields(self.marks.get(key, {}))
+        mark["blue"] = normalise_blue(level)
+        if has_mark_data(mark):
+            self.marks[key] = mark
+        else:
+            self.marks.pop(key, None)
+        self._persist_data()
+        self._refresh_habit()
+
     def _on_craving_changed(self, cell, which, value):
         if cell.day_date is None:
             return
@@ -1769,21 +1857,26 @@ class HabitTracker(QMainWindow):
         green = self.mark_green_input.text().strip() or DEFAULT_MARK_GREEN_LABEL
         red = self.mark_red_input.text().strip() or DEFAULT_MARK_RED_LABEL
         gold = self.mark_gold_input.text().strip() or DEFAULT_MARK_GOLD_LABEL
+        blue = self.mark_blue_input.text().strip() or DEFAULT_MARK_BLUE_LABEL
         if self.mark_green_input.text() != green:
             self.mark_green_input.setText(green)
         if self.mark_red_input.text() != red:
             self.mark_red_input.setText(red)
         if self.mark_gold_input.text() != gold:
             self.mark_gold_input.setText(gold)
+        if self.mark_blue_input.text() != blue:
+            self.mark_blue_input.setText(blue)
         if (
             self.settings.get("mark_green_label") == green
             and self.settings.get("mark_red_label") == red
             and self.settings.get("mark_gold_label") == gold
+            and self.settings.get("mark_blue_label") == blue
         ):
             return
         self.settings["mark_green_label"] = green
         self.settings["mark_red_label"] = red
         self.settings["mark_gold_label"] = gold
+        self.settings["mark_blue_label"] = blue
         self._persist_data()
         self._refresh_habit()
 
@@ -1846,6 +1939,9 @@ class HabitTracker(QMainWindow):
         self.mark_gold_input.setText(
             self.settings.get("mark_gold_label") or DEFAULT_MARK_GOLD_LABEL
         )
+        self.mark_blue_input.setText(
+            self.settings.get("mark_blue_label") or DEFAULT_MARK_BLUE_LABEL
+        )
         self._refresh_calendar()
         self._refresh_plot()
         self._refresh_stats()
@@ -1896,6 +1992,11 @@ class HabitTracker(QMainWindow):
                 remote_settings["mark_gold_label"] or DEFAULT_MARK_GOLD_LABEL
             )
             self.mark_gold_input.setText(self.settings["mark_gold_label"])
+        if "mark_blue_label" in remote_settings:
+            self.settings["mark_blue_label"] = (
+                remote_settings["mark_blue_label"] or DEFAULT_MARK_BLUE_LABEL
+            )
+            self.mark_blue_input.setText(self.settings["mark_blue_label"])
         self.settings["weekly_goals"] = merge_weekly_goals(
             self.settings.get("weekly_goals"), remote_settings.get("weekly_goals")
         )
@@ -1950,6 +2051,38 @@ class HabitTracker(QMainWindow):
             bg = off_colour
             fg = TEXT
             hover = hover_colour
+        btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {bg};
+                color: {fg};
+                border: none;
+                border-radius: 4px;
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover};
+            }}
+            """
+        )
+
+    def _style_blue_button(self, btn, level, tip):
+        btn.show()
+        btn.setEnabled(True)
+        level = normalise_blue(level)
+        word = BLUE_LEVEL_WORDS[level]
+        btn.setToolTip(f"{tip}: {word}. Click to raise, right-click to lower.")
+        btn.blockSignals(True)
+        btn.setLevel(level)
+        btn.blockSignals(False)
+        if level == "H":
+            bg, fg, hover = MARK_BLUE, BG, MARK_BLUE
+        elif level == "M":
+            bg, fg, hover = MARK_BLUE_MED, BG, MARK_BLUE_MED_HOVER
+        elif level == "L":
+            bg, fg, hover = MARK_BLUE_LOW, TEXT, MARK_BLUE_LOW_HOVER
+        else:
+            bg, fg, hover = MARK_BLUE_OFF, TEXT, MARK_BLUE_OFF_HOVER
         btn.setStyleSheet(
             f"""
             QPushButton {{
@@ -2084,6 +2217,8 @@ class HabitTracker(QMainWindow):
         green_label = self.settings.get("mark_green_label") or DEFAULT_MARK_GREEN_LABEL
         red_label = self.settings.get("mark_red_label") or DEFAULT_MARK_RED_LABEL
         gold_label = self.settings.get("mark_gold_label") or DEFAULT_MARK_GOLD_LABEL
+        blue_label = self.settings.get("mark_blue_label") or DEFAULT_MARK_BLUE_LABEL
+        cell.craving_spacer.show()
         self._style_craving_box(
             cell.green_craving,
             mark["green_craving"],
@@ -2129,6 +2264,7 @@ class HabitTracker(QMainWindow):
             MARK_GOLD_OFF_HOVER,
             gold_label,
         )
+        self._style_blue_button(cell.blue_btn, mark["blue"], blue_label)
 
     def _refresh_habit(self):
         self.habit_month_label.setText(
@@ -2146,9 +2282,11 @@ class HabitTracker(QMainWindow):
         green_label = self.settings.get("mark_green_label") or DEFAULT_MARK_GREEN_LABEL
         red_label = self.settings.get("mark_red_label") or DEFAULT_MARK_RED_LABEL
         gold_label = self.settings.get("mark_gold_label") or DEFAULT_MARK_GOLD_LABEL
+        blue_label = self.settings.get("mark_blue_label") or DEFAULT_MARK_BLUE_LABEL
         green_count = 0
         red_count = 0
         gold_count = 0
+        blue_count = 0
 
         for r, week in enumerate(weeks):
             for c, day_num in enumerate(week):
@@ -2162,6 +2300,8 @@ class HabitTracker(QMainWindow):
                     red_count += 1
                 if mark.get("gold"):
                     gold_count += 1
+                if normalise_blue(mark.get("blue")) != "N":
+                    blue_count += 1
                 self._style_habit_cell(
                     self.habit_cells[r][c], day_date, day_num, today
                 )
@@ -2175,13 +2315,16 @@ class HabitTracker(QMainWindow):
             parts.append(f"{red_label} {mark['red_craving']}")
         if mark["gold"] or mark["gold_craving"]:
             parts.append(f"{gold_label} {mark['gold_craving']}")
+        if mark["blue"] != "N":
+            parts.append(f"{blue_label} {mark['blue']}")
         when = self.selected_date.strftime("%d %b %Y")
         if parts:
             self.habit_status_label.setText(f"Selected: {when} — {', '.join(parts)}")
         else:
             self.habit_status_label.setText(f"Selected: {when} — no marks")
         self.habit_summary_label.setText(
-            f"{green_label}: {green_count}  ·  {red_label}: {red_count}  ·  {gold_label}: {gold_count}"
+            f"{green_label}: {green_count}  ·  {red_label}: {red_count}  ·  "
+            f"{gold_label}: {gold_count}  ·  {blue_label}: {blue_count}"
         )
 
     def _plot_entries(self):

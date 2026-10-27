@@ -1,5 +1,11 @@
 # History
 
+## 2026-10-27
+
+Added a fourth Habit tick, drawn as a blue square, with no craving box above it. It can be named from the legend and is stored with that day's marks in the local JSON file and the Obsidian table.
+
+The blue square shows N, L, M, or H (None, Low, Medium, High). Click raises the level and right-click lowers it. None is not stored. An older on/off blue tick is read as High when it was on, and None when it was off.
+
 ## 2026-10-26
 
 Split weekly goals into Professional and Personal sections with a divider. Existing goals without a section stay under Professional. Copying last week's unfinished items keeps each goal in its section.
